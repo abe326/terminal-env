@@ -16,6 +16,9 @@ local config = wezterm.config_builder()
 ----------------------------------------------------------------
 local S = {
   -- 基本(Windows だけで使う場合も、ここだけで動く)
+  -- ローカルの pane のシェル。nil なら PowerShell 7(pwsh.exe)が PATH にあればそれ、無ければ Windows に最初から入っている
+  -- PowerShell 5.1(powershell.exe)
+  shell = nil,
   -- Shift+Alt+P で一覧するローカルのフォルダ(文字列か、複数なら配列)。nil ならホーム
   local_projects_root = nil,
   -- フォルダを開いたとき、右の pane で起動するコマンド。false ならシェルのまま
@@ -88,6 +91,15 @@ for _, r in ipairs(S.remotes) do
   r.mutagen = as_list(r.mutagen)
 end
 S.local_projects_root = as_list(S.local_projects_root)
+
+local function on_path(exe)
+  for dir in (os.getenv("PATH") or ""):gmatch("[^;]+") do
+    local f = io.open(dir:gsub('"', ""):gsub("[\\/]$", "") .. "\\" .. exe, "rb")
+    if f then f:close() return true end
+  end
+  return false
+end
+local SHELL = S.shell or (on_path("pwsh.exe") and "pwsh.exe" or "powershell.exe")
 
 local function remote_by_host(host)
   for _, r in ipairs(S.remotes) do
@@ -184,7 +196,7 @@ for k, v in pairs(S.theme_colors or {}) do T[k] = v end
 -- 見た目
 ----------------------------------------------------------------
 config.automatically_reload_config = true
-config.default_prog = { "pwsh.exe", "-NoLogo" }
+config.default_prog = { SHELL, "-NoLogo" }
 -- ツリーの「設定」が開くファイル(Windows の nvim が読む)
 -- (今のフォルダの git.exe などを動かさない設定は、ツリーとエディタの nvim の中だけで行う。
 --  pane のシェル全体にかけると、cmd で今のフォルダのプログラムを名前だけで起動できなくなるため)
@@ -963,7 +975,7 @@ local function upload(window, pane, rem, dest, files)
         .. "& scp -r -- @($j.files) $j.target;"
         .. "if($LASTEXITCODE -eq 0){[Console]::Write([char]27+']777;notify;WezTerm;'+$j.ok+[char]7);Start-Sleep -Milliseconds 300;exit 0}"
         .. "Write-Host $j.ng;[void][Console]::ReadKey($true);exit 1"
-      p:split({ direction = "Bottom", size = 6, args = { "pwsh.exe", "-NoLogo", "-NoProfile", "-EncodedCommand",
+      p:split({ direction = "Bottom", size = 6, args = { SHELL, "-NoLogo", "-NoProfile", "-EncodedCommand",
         base64((script:gsub(".", "%0\0"))) } })
     end),
   }), pane)
@@ -1556,7 +1568,7 @@ config.keys = {
   { key = "v", mods = "CTRL", action = act.PasteFrom("Clipboard") },
   -- Shift+Enter / Alt+Enter: Claude Code の改行(tmux を挟んでも届くよう Esc+Enter として送る)。
   -- Alt+Enter は WezTerm の標準では全画面の切り替えなので、改行に置き換える。
-  -- pwsh では Esc が「行の取り消し」になるので、Claude Code 以外のローカルの pane には押したキーのまま渡す
+  -- PowerShell では Esc が「行の取り消し」になるので、Claude Code 以外のローカルの pane には押したキーのまま渡す
   { key = "Enter", mods = "SHIFT", action = newline_key("SHIFT") },
   { key = "Enter", mods = "ALT", action = newline_key("ALT") },
 }

@@ -12,7 +12,6 @@
 | Neovim | ツリー・エディタ | Apache-2.0(一部 Vim License) | <https://neovim.io> / <https://github.com/neovim/neovim> |
 | UDEV Gothic NF | フォント | SIL Open Font License 1.1 | <https://github.com/yuru7/udev-gothic> |
 | Git(Windows では Git for Windows) | プラグインの取得・Git の状態・hook を動かす bash | GPL-2.0 | <https://git-scm.com> / <https://gitforwindows.org> |
-| PowerShell 7 | Windows のシェル | MIT | <https://github.com/PowerShell/PowerShell> |
 | ripgrep | 検索の本体 | MIT / Unlicense(どちらか) | <https://github.com/BurntSushi/ripgrep> |
 | lazy.nvim | プラグイン管理 | Apache-2.0 | <https://github.com/folke/lazy.nvim> |
 | tokyonight.nvim | 配色 | Apache-2.0 | <https://github.com/folke/tokyonight.nvim> |
@@ -29,6 +28,7 @@
 | 名前 | 用途 | ライセンス | 公式の配布元 |
 |---|---|---|---|
 | tmux | リモートの pane 管理 | ISC | <https://github.com/tmux/tmux> |
+| PowerShell 7 | 入っていれば、この PC の pane のシェルに使う(無ければ Windows 標準の PowerShell 5.1) | MIT | <https://github.com/PowerShell/PowerShell> |
 | OpenSSH | リモートへの接続 | BSD 系(Windows 標準の機能) | Windows の「オプション機能」 |
 | lazygit | Git の操作画面 | MIT | <https://github.com/jesseduffield/lazygit> |
 | Mutagen | ファイルの同期(右上の同期の状態) | MIT。ただし v0.17 以降の公式ビルドには SSPL のコードを含む | <https://github.com/mutagen-io/mutagen> |

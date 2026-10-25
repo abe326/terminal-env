@@ -7,6 +7,8 @@ return {
   ----------------------------------------------------------------
   -- Shift+Alt+P(と O)で一覧するフォルダ。この直下のフォルダを選べる。複数なら { [[C:\a]], [[D:\b]] }
   local_projects_root = [[C:\Users\<you>\work]],
+  -- この PC の pane のシェル(省略時は pwsh.exe が PATH にあればそれ、無ければ Windows 標準の powershell.exe)
+  -- shell = "powershell.exe",
   -- フォルダを開いたとき右の pane で起動するコマンド(省略時 "claude")。シェルのまま開くなら false
   -- start_command = "claude",
   -- フォルダを開いたとき左にツリーを出すか(省略時 true)

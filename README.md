@@ -17,57 +17,73 @@ Windows の **WezTerm** と **Neovim(neo-tree)のツリー** を組み合わせ�
 
 | 場所 | もの |
 |---|---|
-| Windows 10/11 | WezTerm、Neovim 0.12 以上、Git(Git Bash を含む)、ripgrep、lazygit(任意)、PowerShell 7(`pwsh`)、UDEV Gothic NF フォント |
+| Windows 10/11 | WezTerm、Neovim 0.12 以上、Git(Git Bash を含む)、ripgrep、lazygit(任意)、UDEV Gothic NF フォント。**管理者権限は要りません**(すべて自分のユーザーだけに入れます)。シェルは PowerShell 7(`pwsh`)があればそれを、無ければ Windows に最初から入っている PowerShell 5.1 を使います |
 | リモートの Linux 機(使う場合だけ) | tmux 3.3 以上、Neovim 0.10 以上、Git、ripgrep、lazygit(任意)、bash、coreutils(`base64` など)。Windows からは OpenSSH クライアント(Windows 標準)で鍵を使ってつなぐ |
 
-## 導入(Windows)
+## Claude Code に導入を任せる場合
 
-### 1. ソフトを入れる(winget。どれも公式パッケージ)
+Windows と、つなぐ Linux 機のそれぞれで Claude Code を開き、「terminal-env の README の導入を進めて」と頼めば、この README を読んで進められるように書いてあります。Claude Code に守ってほしいこと:
+
+1. **先に利用者に聞く**(推測で埋めない)
+   - Windows だけで使うか、ssh でつなぐ Linux 機も使うか
+   - Shift+Alt+P で一覧するこの PC のフォルダ(`local_projects_root`)
+   - リモートを使うなら: 表示名・`~/.ssh/config` の Host 名(鍵で入れること)・一覧するフォルダ・Windows から同じファイルが見える経路(`path_map`)
+   - フォルダを開いたときに起動するコマンド(既定は `claude`)
+2. **実行前に利用者の承認を取る**: `~/.claude/settings.json` の書き換え(控えを取り、既にある `hooks` に足す。置き換えない)・`~/.tmux.conf` の書き換え・既にある Neovim の設定の退避
+3. **管理者権限を使わない。** `sudo` や昇格が要る手順になったら、止めて利用者に聞く
+4. **自分の環境の値は `wezterm/local.lua`(Git 管理外)にだけ書く。** このリポジトリのファイルは書き換えない(`git pull` で更新できなくなる)
+5. **自分の機械だけを触る。** Windows の Claude Code は Windows、Linux の Claude Code は Linux
+6. **終わったら確かめる**
+   - Windows: `scripts\install-windows.ps1 -Check` が「そろっています」で終わる
+   - Linux: 下の「確かめる」のコマンドがすべて通る
+   - 最後に利用者が WezTerm をすべて閉じてから起動し直し、ツリーが出る・Shift+Alt+O でフォルダを開ける・Claude Code の状態がタブに出ることを見る
+
+## 導入(Windows。管理者権限は要らない)
+
+### 1. Git・ripgrep・lazygit を入れる(winget。どれも公式パッケージで、自分のユーザーだけに入る)
 
 ```powershell
-winget install --id wez.wezterm -e
-winget install --id Neovim.Neovim -e
-winget install --id BurntSushi.ripgrep.MSVC -e   # ファイル・文字列の検索
-winget install --id JesseDuffield.lazygit -e     # Git の画面(任意)
-winget install --id Git.Git -e                   # 入っていなければ
-winget install --id Microsoft.PowerShell -e      # 入っていなければ
+winget install --id Git.Git -e --scope user       # 入っていなければ
+winget install --id BurntSushi.ripgrep.MSVC -e    # ファイル・文字列の検索
+winget install --id JesseDuffield.lazygit -e      # Git の画面(任意)
 ```
 
-### 2. フォントを入れる
+入れた後は、PATH を読み直すために PowerShell を開き直します。
 
-作者の公式リリース <https://github.com/yuru7/udev-gothic/releases> から `UDEVGothic_NF_v*.zip` をダウンロードし、
-展開した中の `UDEVGothic35NF-*.ttf` を右クリック →「インストール」。
-
-### 3. このリポジトリを置いて、設定を読ませる
+### 2. このリポジトリを置いて、導入スクリプトを実行する
 
 ```powershell
 git clone https://github.com/abe326/terminal-env.git $HOME\terminal-env
+powershell -NoProfile -ExecutionPolicy Bypass -File $HOME\terminal-env\scripts\install-windows.ps1
+```
 
-# WezTerm にこのリポジトリの設定を読ませる
-[Environment]::SetEnvironmentVariable('WEZTERM_CONFIG_FILE', "$HOME\terminal-env\wezterm\wezterm.lua", 'User')
+`-ExecutionPolicy Bypass` はこの 1 回の実行だけに効きます(PC の設定は変えません)。スクリプトは Windows に最初から入っている PowerShell 5.1 で動き、何度実行しても構いません(済んでいるものは飛ばします)。
 
-# Neovim の設定フォルダをこのリポジトリにつなぐ(既に %LOCALAPPDATA%\nvim がある場合は先に退避する)
-New-Item -ItemType Junction -Path "$env:LOCALAPPDATA\nvim" -Target "$HOME\terminal-env\nvim"
+| 項目 | スクリプトがすること |
+|---|---|
+| WezTerm・Neovim | 公式の zip 版を sha256 で照合し、`%LOCALAPPDATA%\Programs\` に置いてユーザーの PATH に足す。winget などで既に入っていれば、それを使う |
+| スタートメニューの WezTerm | zip 版を入れたときだけ作る。Windows の通知(確認待ち・完了)を出すのに要る。タスクバーへのピン留めはここから |
+| UDEV Gothic NF | 公式の zip の 35NF の 4 本を、自分のフォントに入れる |
+| `WEZTERM_CONFIG_FILE` | ユーザー環境変数。WezTerm がこのリポジトリの設定を読む |
+| `%LOCALAPPDATA%\nvim` | このリポジトリの `nvim` へのジャンクション。既にあれば `nvim.bk_<日時>` に名前を変えて残す |
+| `wezterm\local.lua` | 無ければ見本(`local.example.lua`)から作る |
+| Neovim のプラグイン | lazy.nvim が各プラグインの公式 GitHub リポジトリから、`nvim/lazy-lock.json` の版(作者が動作を確かめた版)を入れる |
 
-# 自分の環境の値を書く(下の「設定」を参照)
-Copy-Item $HOME\terminal-env\wezterm\local.example.lua $HOME\terminal-env\wezterm\local.lua
+- 入れる版と sha256 はスクリプトの先頭にあります。確かめるだけなら `-Check` を付けます(何も変えず、足りないものがあれば終了コード 1)
+- プラグインを新しい版にするときは、Neovim の中で `:Lazy update`(各自の判断で。更新内容を確かめてから)
+
+### 3. 自分の環境の値を書く
+
+```powershell
 notepad $HOME\terminal-env\wezterm\local.lua
 ```
 
-### 4. プラグインを入れる
+書き方は下の「設定」。Windows だけで使うなら `local_projects_root` だけで十分です。
 
-```powershell
-nvim --headless +qa   # 初回の起動でプラグインが入る(lazy-lock.json の版)
-```
-
-プラグインは lazy.nvim が各プラグインの公式 GitHub リポジトリから取得します。
-入る版は、このリポジトリの `nvim/lazy-lock.json` に書いた版(作者が動作を確かめた版)に固定されます。
-新しい版にするときは、Neovim の中で `:Lazy update`(各自の判断で。更新内容を確かめてから)。
-
-### 5. Claude Code の状態をタブに出す(Claude Code を使う場合)
+### 4. Claude Code の状態をタブに出す(Claude Code を使う場合)
 
 `%USERPROFILE%\.claude\settings.json` の `hooks` に次を足します(既に `hooks` があれば、その中に足す)。
-hook は Git Bash で動きます。パスは置いた場所に合わせてください。
+hook は Git Bash で動きます。`<you>` は自分のユーザー名(パスは置いた場所に合わせる)。
 
 ```json
 "hooks": {
@@ -79,6 +95,12 @@ hook は Git Bash で動きます。パスは置いた場所に合わせてく�
   "SessionEnd":       [{ "hooks": [{ "type": "command", "command": "bash \"C:/Users/<you>/terminal-env/bin/tenv-cc-state\" end", "async": true }] }]
 }
 ```
+
+Git を `--scope user` で入れて Claude Code が Git Bash を見つけられないときは、ユーザー環境変数 `CLAUDE_CODE_GIT_BASH_PATH` に `%LOCALAPPDATA%\Programs\Git\bin\bash.exe` を書きます。
+
+### 5. 起動する
+
+開いている WezTerm をすべて閉じてから、スタートメニュー(またはタスクバー)で起動します(WezTerm の中から起動すると、前の環境変数を引き継ぎます)。
 
 ## 導入(リモートの Linux 機。使う場合だけ)
 
@@ -112,6 +134,9 @@ tar xzf lazygit_${ver}_linux_x86_64.tar.gz lazygit && install -m755 lazygit ~/.l
 
 ```bash
 git clone https://github.com/abe326/terminal-env.git ~/terminal-env
+# 既に ~/.config/nvim がフォルダとしてあると、ln はその中にリンクを作ってしまうので、先に名前を変えて残す
+[ -e ~/.config/nvim ] && [ ! -L ~/.config/nvim ] && mv ~/.config/nvim ~/.config/nvim.bk_$(date +%Y%m%d)
+mkdir -p ~/.config ~/.local/bin
 ln -sfn ~/terminal-env/nvim ~/.config/nvim
 ln -sf ~/terminal-env/bin/wopen ~/terminal-env/bin/tmux-tree ~/terminal-env/bin/tenv-open ~/terminal-env/bin/tenv-cc-state ~/.local/bin/
 chmod +x ~/terminal-env/bin/*
@@ -120,15 +145,37 @@ tmux source-file ~/.tmux.conf 2>/dev/null || true
 nvim --headless +qa   # 初回の起動でプラグインが入る(lazy-lock.json の版)
 ```
 
-`~/.local/bin` が `PATH` に入っていない場合は追加してください。
+`~/.local/bin` が `PATH` に入っていない場合は追加してください。管理者権限(`sudo`)は要りません(tmux・ripgrep をパッケージで入れる場合を除く)。
 
 ### 3. Claude Code の状態をタブに出す(Claude Code を使う場合)
 
-Windows と同じ hook を、リモートの `~/.claude/settings.json` に足します。コマンドは `~/.local/bin/tenv-cc-state prompt` のように書きます(`bash "…"` は不要)。
+リモートの `~/.claude/settings.json` の `hooks` に次を足します(既に `hooks` があれば、その中に足す)。
+
+```json
+"hooks": {
+  "UserPromptSubmit": [{ "hooks": [{ "type": "command", "command": "~/.local/bin/tenv-cc-state prompt", "async": true }] }],
+  "PostToolUse":      [{ "hooks": [{ "type": "command", "command": "~/.local/bin/tenv-cc-state tool", "async": true }] }],
+  "Notification":     [{ "matcher": "permission_prompt|elicitation_dialog",
+                         "hooks": [{ "type": "command", "command": "~/.local/bin/tenv-cc-state waiting", "async": true }] }],
+  "Stop":             [{ "hooks": [{ "type": "command", "command": "~/.local/bin/tenv-cc-state done", "async": true }] }],
+  "SessionEnd":       [{ "hooks": [{ "type": "command", "command": "~/.local/bin/tenv-cc-state end", "async": true }] }]
+}
+```
 
 ### 4. Windows 側の設定にリモートを足す
 
 `local.lua` の `remotes` に、つなぐ先を書きます(下の「設定」)。
+
+### 5. 確かめる
+
+```bash
+readlink ~/.config/nvim                                   # ~/terminal-env/nvim
+ls -l ~/.local/bin/{wopen,tmux-tree,tenv-open,tenv-cc-state}
+tmux -L tenv-check -f ~/.tmux.conf new-session -d && tmux -L tenv-check list-keys -T root M-E && tmux -L tenv-check kill-server
+nvim --headless +qa && echo ok
+```
+
+tmux の行は、設定を読む別の tmux を一時的に起動して、Shift+Alt+E が登録されたかを見ます(何も出なければ `source-file` の行が読まれていません。置いた場所のパスに `[` `]` があると、tmux はそれを glob として扱うので `\[` `\]` と書きます)。
 
 ## 使い方
 
@@ -137,7 +184,7 @@ Windows と同じ hook を、リモートの `~/.claude/settings.json` に足し
 1. WezTerm を起動する(左にツリー、右にシェル)。前回 Claude Code を開いたまま閉じていれば、「前の作業」の画面が出る(下の「前の作業を再開」)
 2. **Shift+Alt+O** でフォルダを選ぶ。一覧は接続先ごとに見出しが付き(リモート・この PC)、フォルダの横に **最後に Claude Code へ指示を出した日時** が出る
    - リモートのフォルダ: 新しいタブで ssh + tmux
-   - この PC のフォルダ: 新しいタブで pwsh(**Shift+Alt+P** はこの PC のフォルダだけ)
+   - この PC のフォルダ: 新しいタブで PowerShell(**Shift+Alt+P** はこの PC のフォルダだけ)
 3. 開いたタブは「左にツリー、右で Claude Code が起動」の並びになる
 4. ツリーのファイルをダブルクリックで右上段のエディタに、右クリックで「アプリで開く」など。ツリーは **Shift+Alt+E** で出し入れできる
 5. 作業を終えたら WezTerm を閉じてよい。**リモートは tmux の中で動き続ける**ので、次に同じフォルダを選ぶと、閉じたときの並びのまま戻る。この PC の Claude Code は閉じると止まるが、次の起動時に「前の作業」の画面から続きを開ける
@@ -271,6 +318,7 @@ WezTerm はドラッグ中のマウスの位置をアプリに渡さない(ド�
 
 | 項目 | 既定 | 内容 |
 |---|---|---|
+| `shell` | 自動 | この PC の pane のシェル。省略時は `pwsh.exe` が PATH にあればそれ、無ければ `powershell.exe`(5.1) |
 | `local_projects_root` | ホーム | Shift+Alt+P / O で一覧するフォルダ(この直下を選べる)。複数なら `{ [[C:\a]], [[D:\b]] }` |
 | `start_command` | `"claude"` | フォルダを開いたとき右の pane で起動するコマンド。`false` ならシェルのまま |
 | `open_with_tree` | `true` | フォルダを開いたとき左にツリーを出すか |
@@ -342,6 +390,8 @@ remotes = {
 | `bin/tenv-open` | Shift+Alt+O の本体(リモートでセッションを用意して attach)。`-r <会話>` で、その中で Claude Code の会話を再開する |
 | `bin/tmux-tree` | tmux の Shift+Alt+E の本体。ツリーの幅を保つ。WezTerm からつないだとき、設定が変わる前に起動したツリーを作り直す(tmux のセッションは残るため) |
 | `bin/wopen` | リモート → WezTerm へ合図を送る(開く・表示・編集・Git・設定・操作一覧・ファイルの配置) |
+| `scripts/install-windows.ps1` | Windows の導入(管理者権限なし。`-Check` で確かめるだけ) |
+| `scripts/check_public.py` | 公開前の検査(秘密・個人の情報の形が無いか。CI でも動く) |
 | `bin/tenv-cc-state` | Claude Code の hook から状態を WezTerm のタブへ伝える。指示を出した日時も残す |
 
 ## 仕組み
@@ -393,7 +443,7 @@ remotes = {
 
 ## 外す
 
-- Windows: 環境変数 `WEZTERM_CONFIG_FILE` を消し、`%LOCALAPPDATA%\nvim` のジャンクションを消す。`settings.json` の `tenv-cc-state` の hook を消す
+- Windows: 環境変数 `WEZTERM_CONFIG_FILE` を消し、`%LOCALAPPDATA%\nvim` のジャンクションを消す。`settings.json` の `tenv-cc-state` の hook を消す。導入スクリプトで入れたものは、`%LOCALAPPDATA%\Programs\WezTerm`・`Neovim` のフォルダ、スタートメニューの `WezTerm`、ユーザーの PATH の 2 行、フォント(設定 →「フォント」)
 - Linux: `~/.tmux.conf` の `source-file` の行を消し、`~/.config/nvim` と `~/.local/bin/{wopen,tmux-tree,tenv-open,tenv-cc-state}` のリンクを消す。`settings.json` の hook を消す
 
 ## ライセンス
