@@ -1107,6 +1107,11 @@ wezterm.on("user-var-changed", function(window, pane, name, value)
     if refused > 0 then
       window:toast_notification("WezTerm", refused .. " 件は送りません(鍵や認証の情報の置き場所: .ssh・.aws など)", nil, 6000)
     end
+    -- 配置先はリモートのシェルが解釈することがある(古い scp)。シェルで意味を持つ記号を含む配置先には送らない
+    if dest and dest:find("[$`;&|<>(){}\\\"'*?!]") then
+      window:toast_notification("WezTerm", "配置先の名前に記号($ ; & | ` など)が含まれるので送りません", nil, 6000)
+      return
+    end
     -- 確認が出ている間に来た次の合図は無視する(続けて送りつけられても、うっかり Enter で送らないように)
     if dest and #files > 0 and os.time() - (wezterm.GLOBAL.tenv_upload_at or 0) > 3 then
       wezterm.GLOBAL.tenv_upload_at = os.time()
