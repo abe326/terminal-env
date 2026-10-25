@@ -1,0 +1,120 @@
+#!/usr/bin/env bash
+# tenv-open [-c <起動コマンド>] [-a <attach コマンド>] [-T] [-w <桁>] [-f <1|0>] [-k <合言葉>] [-r <会話>]... <dir>
+#   フォルダ専用の tmux セッションを開く。WezTerm の Shift+Alt+O から ssh 越しに呼ばれる。
+#   ・セッションが無ければ作り、「左にツリー、右に <起動コマンド>(既定なし)」の並びにする
+#   ・あればそのまま戻る(閉じたときの並びのまま)
+#   -a を渡すと、最後の attach をそのコマンドに任せる(<attach コマンド> <dir> の形で呼ぶ)
+#   -T を渡すとツリーを出さない
+#   -k <合言葉>: WezTerm からの合言葉。自分だけが読めるファイル ~/.local/state/tenv/tokens に書く
+#                (wopen / tenv-cc-state が合図に付ける。PC ごとに 1 行、新しい順に 5 つまで)
+#   -r <会話>: Claude Code の会話を再開する(何度でも指定できる)。<起動コマンド> --resume <会話> を、
+#              空いている pane(シェルのまま)か、新しく分けた pane で動かす。すでに動いている会話は飛ばす
+#   -w <桁> / -f <1|0>: ツリーの幅と、窓の大きさを変えても幅を保つか(tmux-tree が使う。WezTerm の設定 tree_width / tree_width_fixed)
+set -eu
+
+start_cmd=""
+attach_cmd=""
+with_tree=1
+tree_w=""
+tree_fixed=""
+token=""
+resume_ids=()
+while getopts "c:a:Tw:f:k:r:" opt; do
+  case "$opt" in
+    c) start_cmd="$OPTARG" ;;
+    a) attach_cmd="${OPTARG/#\~/$HOME}" ;;
+    T) with_tree=0 ;;
+    # ツリーの幅(桁)と、窓の大きさを変えても幅を保つか(1 / 0)。tmux-tree が使う
+    w) tree_w="$OPTARG" ;;
+    f) tree_fixed="$OPTARG" ;;
+    k) case "$OPTARG" in *[!0-9a-fA-F]*|"") ;; *) token="$OPTARG" ;; esac ;;
+    r) case "$OPTARG" in *[!0-9a-fA-F-]*|"") ;; *) resume_ids+=("$OPTARG") ;; esac ;;
+    *) echo "usage: tenv-open [-c cmd] [-a attach_cmd] [-T] [-w width] [-f 1|0] [-k token] [-r id]... <dir>" >&2; exit 2 ;;
+  esac
+done
+shift $((OPTIND - 1))
+
+dir="$(cd "${1:-.}" 2>/dev/null && pwd -P)" || { echo "tenv-open: no such dir: ${1:-.}" >&2; exit 1; }
+# セッション名はフォルダの物理パスから作る(~/ と先頭 / を除き、/ . : を _ に)
+name="${dir#$HOME/}"; name="${name#/}"; name="${name//[\/.:]/_}"
+
+# ツリーの幅の設定を tmux に入れる(tmux が動いてからでないと入れられない)
+apply_tree_opts() {
+  [ -z "$tree_w" ] || tmux set -g @tenv_tree_width "$tree_w"
+  [ -z "$tree_fixed" ] || tmux set -g @tenv_tree_fixed "$tree_fixed"
+}
+
+# 合言葉を残す(tmux を起動し直しても残るようファイルに)
+save_token() {
+  [ -n "$token" ] || return 0
+  local d="${XDG_STATE_HOME:-$HOME/.local/state}/tenv" f
+  f="$d/tokens"
+  ( umask 077; mkdir -p "$d"
+    { echo "$token"; grep -vx -- "$token" "$f" 2>/dev/null | head -4; } > "$f.new" && mv -f "$f.new" "$f" )
+}
+save_token
+
+# Claude Code の会話を再開するコマンド
+resume_cmd() { printf '%s --resume %s' "${start_cmd:-claude}" "$1"; }
+
+# その会話が、いまどこかで動いているか(Claude Code が残す、動いている会話の記録 ~/.claude/sessions/<pid>.json)
+session_running() {
+  local f pid
+  for f in "${CLAUDE_CONFIG_DIR:-$HOME/.claude}"/sessions/*.json; do
+    [ -e "$f" ] || continue
+    grep -q "\"sessionId\":\"$1\"" "$f" 2>/dev/null || continue
+    pid=${f##*/}; pid=${pid%.json}
+    kill -0 "$pid" 2>/dev/null && return 0
+  done
+  return 1
+}
+
+# 会話を pane で再開する: シェルのままの pane があればそこで、無ければ一番右の pane を左右に分けて
+resume_in_session() {
+  local id p used=" "
+  for id in "$@"; do
+    session_running "$id" && continue
+    # (この中で使った pane は、まだシェルに見えても使わない。Claude Code が起動するまで少しかかるため)
+    p=$(tmux list-panes -t "=$name:" -F '#{pane_id} #{@tree} #{pane_current_command}' |
+      awk -v used="$used" '$2 != 1 && $NF ~ /^-?(bash|zsh|sh|dash|fish|ksh)$/ && index(used, " " $1 " ") == 0 { print $1; exit }')
+    if [ -z "$p" ]; then
+      p=$(tmux list-panes -t "=$name:" -F '#{pane_id} #{@tree}' | awk '$2 != 1 { p = $1 } END { print p }')
+      p=$(tmux split-window -h -t "$p" -c "$dir" -P -F '#{pane_id}')
+    fi
+    tmux send-keys -t "$p" "$(resume_cmd "$id")" Enter
+    used="$used$p "
+  done
+}
+
+if ! tmux has-session -t "=$name" 2>/dev/null; then
+  # 手元の端末と同じ大きさで作る(後で attach したときにツリーの幅が引き伸ばされないように)
+  size=$(stty size 2>/dev/null || echo "50 200")
+  tmux new-session -d -s "$name" -c "$dir" -x "${size#* }" -y "${size% *}"
+  apply_tree_opts
+  main=$(tmux display -p -t "=$name:" '#{pane_id}')
+  if [ ${#resume_ids[@]} -gt 0 ]; then
+    resume_in_session "${resume_ids[@]}"
+  elif [ -n "$start_cmd" ]; then
+    # シェルの中で起動する(終了してもシェルに戻り、pane は消えない)
+    tmux send-keys -t "$main" "$start_cmd" Enter
+  fi
+  here="$(cd "$(dirname "$0")" && pwd -P)"
+  tree="$here/tmux-tree"
+  [ -e "$tree" ] || tree="$HOME/.local/bin/tmux-tree"
+  [ "$with_tree" = 1 ] && { bash "$tree" "$main" || true; }
+  tmux select-pane -t "$main"
+elif [ ${#resume_ids[@]} -gt 0 ]; then
+  resume_in_session "${resume_ids[@]}"
+fi
+
+apply_tree_opts
+
+if [ -n "$attach_cmd" ]; then
+  # attach のコマンドが別名のセッション(同じ窓を共有するグループ)を作るとき、そのフォルダを作業場所にする(タブ名に使う)
+  cd "$dir"
+  exec $attach_cmd "$dir"
+fi
+if [ -n "${TMUX:-}" ]; then
+  exec tmux switch-client -t "=$name"
+fi
+exec tmux attach -t "=$name"

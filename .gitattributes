@@ -1,0 +1,2 @@
+# Windows で clone しても改行を LF に揃える(bin/ のスクリプトは Git Bash で動くので CRLF だと壊れる)
+* text=auto eol=lf

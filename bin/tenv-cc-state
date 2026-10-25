@@ -1,0 +1,100 @@
+#!/usr/bin/env bash
+# tenv-cc-state : Claude Code の状態を、手元の WezTerm のタブに伝える(タブに「作業中 / 確認待ち / 完了」を出す)
+#
+# Claude Code の hook から呼ぶ(~/.claude/settings.json。README 参照)。Windows でも Git Bash で動く。
+#   tenv-cc-state prompt   : 指示を出した(UserPromptSubmit)→ 作業中。フォルダ一覧に出す「指示を出した日時」も残す
+#   tenv-cc-state tool     : ツールを使った(PostToolUse)→ 確認待ちだったなら作業中に戻す
+#   tenv-cc-state waiting  : 許可などの確認を求めている(Notification)→ 確認待ち
+#   tenv-cc-state done     : 応答を終えた(Stop)→ 完了
+#   tenv-cc-state end      : セッションを終えた(SessionEnd)→ 消す
+# tmux から呼ぶ(tmux/terminal-env.conf)
+#   tenv-cc-state --focus <pane>   : pane を見た → 完了の印を消す
+#   tenv-cc-state --sync <session> : WezTerm がつないだ → 今の状態を送り直す
+#
+# 伝え方
+#   リモート(tmux の中): pane の @cc_state に残し、セッションの全 pane のうち一番目立つ状態を
+#     WezTerm のユーザー変数 tenv_cc として送る(tmux の passthrough。WezTerm ではタブ = セッション)
+#   ローカル(WezTerm の pane の中): %LOCALAPPDATA%\tenv\cc\<WezTerm の pid>\<pane 番号> に書き、WezTerm が読む
+set -u
+# 作るファイル(作業フォルダの名前・指示を出した時刻)は自分だけが読めるようにする
+umask 077
+
+state_home() {
+  if [ -n "${LOCALAPPDATA:-}" ]; then printf '%s/tenv' "$LOCALAPPDATA"
+  else printf '%s/tenv' "${XDG_STATE_HOME:-$HOME/.local/state}"; fi
+}
+
+# セッションの全 pane のうち一番目立つ状態(確認待ち > 完了 > 作業中)と、その状態の pane の数
+aggregate() {
+  tmux list-panes -s -t "$1" -F '#{@cc_state}' 2>/dev/null | awk '
+    BEGIN { r["waiting"] = 3; r["done"] = 2; r["working"] = 1 }
+    $1 in r { n[$1]++; if (r[$1] > best) { best = r[$1]; s = $1 } }
+    END { if (s != "") printf "%s %d", s, n[s] }'
+}
+
+send() { # $1 = セッション
+  local pane tty val
+  pane=$(tmux list-panes -s -t "$1" -F '#{pane_id}' 2>/dev/null | head -1)
+  [ -n "$pane" ] || return 0
+  tty=$(tmux display -p -t "$pane" '#{pane_tty}')
+  # "<状態> <数> <合言葉>"(状態が無いときは none 0)。合言葉は WezTerm がフォルダを開くときに残したもの(tenv-open -k)
+  local agg tok
+  agg=$(aggregate "$1")
+  tok=$(grep -E "^[0-9a-fA-F]+$" "$(state_home)/tokens" 2>/dev/null | paste -sd, -)
+  val=$(printf '%s %s' "${agg:-none 0}" "$tok" | base64 | tr -d '\n')
+  # pane の端末に書くと tmux が passthrough として手元の WezTerm に渡す(途中で他の出力と混ざらない)
+  printf '\033Ptmux;\033\033]1337;SetUserVar=tenv_cc=%s\007\033\\' "$val" > "$tty" 2>/dev/null || true
+}
+
+set_tmux() { # $1 = pane, $2 = 状態(空なら消す)
+  if [ -n "$2" ]; then tmux set -p -t "$1" @cc_state "$2"; else tmux set -pu -t "$1" @cc_state; fi
+  send "$(tmux display -p -t "$1" '#{session_name}')"
+}
+
+case "${1:-}" in
+  --focus)
+    [ "$(tmux show -pv -t "$2" @cc_state 2>/dev/null)" = done ] && set_tmux "$2" ""
+    exit 0 ;;
+  --sync)
+    send "$2"
+    exit 0 ;;
+esac
+
+ev="${1:-}"
+cat > /dev/null # hook の入力(JSON)は使わない
+
+if [ "$ev" = prompt ]; then
+  # 指示を出した日時。キーはフォルダのパス(小文字にし、/ \ : を % に)
+  dir="${CLAUDE_PROJECT_DIR:-$PWD}"
+  key=$(printf '%s' "$dir" | tr 'A-Z' 'a-z' | sed 's#[/\\:]#%#g')
+  mkdir -p "$(state_home)/last-prompt" && date +%s > "$(state_home)/last-prompt/$key"
+fi
+
+case "$ev" in
+  prompt) new=working ;;
+  tool) new=working ;;
+  waiting) new=waiting ;;
+  done) new=done ;;
+  end) new= ;;
+  *) exit 0 ;;
+esac
+
+if [ -n "${TMUX_PANE:-}" ] && command -v tmux > /dev/null; then
+  if [ "$ev" = tool ]; then
+    [ "$(tmux show -pv -t "$TMUX_PANE" @cc_state 2>/dev/null)" = waiting ] || exit 0
+  fi
+  set_tmux "$TMUX_PANE" "$new"
+elif [ -n "${WEZTERM_PANE:-}" ]; then
+  # pane 番号と WezTerm の番号は数字だけ(ファイルの場所に使うため)
+  case "$WEZTERM_PANE" in *[!0-9]*|"") exit 0 ;; esac
+  case "${WEZTERM_UNIX_SOCKET##*-}" in *[!0-9]*|"") exit 0 ;; esac
+  # WezTerm のプロセスごとに分ける(pane 番号はプロセスごとに 0 から振られる。gui-sock-<pid> の pid)
+  d="$(state_home)/cc/${WEZTERM_UNIX_SOCKET##*-}"
+  f="$d/$WEZTERM_PANE"
+  if [ "$ev" = tool ]; then
+    grep -q '^waiting' "$f" 2>/dev/null || exit 0
+  fi
+  mkdir -p "$d"
+  if [ -n "$new" ]; then printf '%s %s\n' "$new" "$(date +%s)" > "$f"; else rm -f "$f"; fi
+fi
+exit 0

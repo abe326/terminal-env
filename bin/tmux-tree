@@ -1,0 +1,90 @@
+#!/usr/bin/env bash
+# tmux-tree <pane_id> : そのウィンドウの左端にツリー(nvim + neo-tree)を出す
+#   無ければ作る / あってツリー以外にいるならツリーへ移る / ツリーにいるなら閉じる
+# tmux の Shift+Alt+E(tmux/terminal-env.conf の M-E)から呼ばれる。
+#
+# tmux-tree --fit <window_id>      : ツリーの幅を覚えている幅に戻す(窓の大きさが変わったとき。tmux は比率で引き伸ばすため)
+#   幅の既定と、保つかどうかは tmux の @tenv_tree_width(既定 34)/ @tenv_tree_fixed(既定 1)。WezTerm の設定から tenv-open が入れる
+# tmux-tree --remember <window_id> : 今のツリーの幅を覚える(境目をドラッグして変えたとき)
+# tmux-tree --refresh              : 設定(nvim/)が変わる前に起動したツリーを作り直す(WezTerm からつないだとき)。
+#   tmux のセッションは WezTerm を閉じても残るため、そのままでは古い設定のツリーが動き続ける
+set -eu
+
+WIDTH=$(tmux show -gv @tenv_tree_width 2>/dev/null || true)
+# tmux のオプションの値は数字だけ受け付ける(計算に使うため)
+case "$WIDTH" in "" | *[!0-9]*) WIDTH=34 ;; esac
+FIXED=$(tmux show -gv @tenv_tree_fixed 2>/dev/null || true); FIXED=${FIXED:-1}
+ROOT=$(cd "$(dirname "$0")/.." && pwd)
+
+tree_of() { tmux list-panes -t "$1" -F '#{pane_id} #{@tree}' | awk '$2 == 1 { print $1; exit }'; }
+# 設定の版(nvim/ の中でいちばん新しい更新時刻)
+stamp() { find "$ROOT/nvim" -type f -printf '%T@\n' | sort -n | tail -1; }
+# ツリーを動かすコマンド。$1 = 右側の pane
+tree_cmd() { echo "NVIM_TREE_ONLY=1 TENV_MAIN_PANE=$1 exec $(command -v nvim || echo "$HOME/.local/bin/nvim")"; }
+
+case "${1:-}" in
+  --refresh)
+    s=$(stamp)
+    tmux list-panes -a -F '#{pane_id} #{window_id} #{@tree} #{@tree_stamp}' | while read -r p w t old; do
+      [ "$t" = 1 ] && [ "${old:-}" != "$s" ] || continue
+      # 右側の pane(ツリーから開いたファイルのエディタを、この上に作る)。古いツリーは覚えていないので、nvim 以外の pane を選ぶ
+      main=$(tmux show -pv -t "$p" @tree_main 2>/dev/null || true)
+      tmux list-panes -t "$w" -F '#{pane_id}' | grep -qx -- "${main:-none}" || main=$(
+        tmux list-panes -t "$w" -F '#{pane_id} #{@tree} #{pane_current_command}' |
+          awk '$2 != 1 && $3 != "nvim" { print $1; exit }')
+      tmux respawn-pane -k -t "$p" "$(tree_cmd "${main:-}")"
+      tmux set -p -t "$p" @tree_main "${main:-}"
+      tmux set -p -t "$p" @tree_stamp "$s"
+    done
+    # 幅を覚えていない窓(前の版で作ったツリー)は、今の幅を覚える(窓の大きさが変わっても幅を保てるように)
+    tmux list-panes -a -F '#{window_id} #{@tree} #{pane_width}' | while read -r w t pw; do
+      [ "$t" = 1 ] || continue
+      [ -n "$(tmux show -wv -t "$w" @tree_w 2>/dev/null || true)" ] && continue
+      tmux set -w -t "$w" @tree_w "$pw"
+      tmux set -w -t "$w" @tree_ratio "$(( pw * 1000 / $(tmux display -p -t "$w" '#{window_width}') ))"
+    done
+    exit 0 ;;
+  --fit)
+    t=$(tree_of "$2"); [ -n "$t" ] || exit 0
+    if [ "$FIXED" = 1 ]; then
+      w=$(tmux show -wv -t "$2" @tree_w 2>/dev/null || true)
+      case "$w" in *[!0-9]*) w="" ;; esac
+    else
+      # 保たない設定では、窓の幅に対する割合を保つ(tmux のままだと、縮めたときにツリーが潰れる)
+      r=$(tmux show -wv -t "$2" @tree_ratio 2>/dev/null || true)
+      case "$r" in "" | *[!0-9]*) exit 0 ;; esac
+      w=$(( $(tmux display -p -t "$2" '#{window_width}') * r / 1000 ))
+      [ "$w" -ge 10 ] || w=10
+    fi
+    tmux resize-pane -t "$t" -x "${w:-$WIDTH}"
+    exit 0 ;;
+  --remember)
+    t=$(tree_of "$2"); [ -n "$t" ] || exit 0
+    w=$(tmux display -p -t "$t" '#{pane_width}')
+    tmux set -w -t "$2" @tree_w "$w"
+    tmux set -w -t "$2" @tree_ratio "$(( w * 1000 / $(tmux display -p -t "$2" '#{window_width}') ))"
+    exit 0 ;;
+esac
+
+pane="${1:-${TMUX_PANE:-}}"
+win=$(tmux display -p -t "$pane" '#{window_id}')
+tree=$(tmux list-panes -t "$win" -F '#{pane_id} #{@tree}' | awk '$2 == 1 { print $1; exit }')
+
+if [ -n "$tree" ]; then
+  if [ "$tree" = "$pane" ]; then
+    tmux kill-pane -t "$tree"
+  else
+    tmux select-pane -t "$tree"
+  fi
+  exit 0
+fi
+
+dir=$(tmux display -p -t "$pane" '#{pane_current_path}')
+# 開くときはいつも既定の幅(前に境目をドラッグして変えた幅は使わない)
+w=$WIDTH
+new=$(tmux split-window -hbf -l "${w:-$WIDTH}" -t "$pane" -c "$dir" -P -F '#{pane_id}' "$(tree_cmd "$pane")")
+tmux set -w -t "$win" @tree_w "$w"
+tmux set -w -t "$win" @tree_ratio "$(( w * 1000 / $(tmux display -p -t "$win" '#{window_width}') ))"
+tmux set -p -t "$new" @tree 1
+tmux set -p -t "$new" @tree_main "$pane"
+tmux set -p -t "$new" @tree_stamp "$(stamp)"
