@@ -150,12 +150,25 @@ function Install-Zip([string]$url, [string]$sha256, [string]$inner, [string]$des
     $got = (Get-FileHash -LiteralPath $zip -Algorithm SHA256).Hash
     if ($got -ne $sha256.ToUpperInvariant()) { throw "sha256 が合いません($url)。期待 $sha256 / 実際 $got" }
     Expand-Archive -LiteralPath $zip -DestinationPath $tmp
+    # 入れ替えに移る前に、zip の中のフォルダがあることを確かめる(dest を触る前に止める)
+    $src = Join-Path $tmp $inner
+    if (-not (Test-Path -LiteralPath $src)) { throw "zip の中に $inner が見つかりません($url)" }
+    New-Item -ItemType Directory -Force -Path (Split-Path -Parent $dest) | Out-Null
+    $bk = $null
     if (Test-Path -LiteralPath $dest) {
       # 前の版は消さずに名前を変えて残す(使っている最中だと失敗するので、そのときは閉じてからやり直す)
-      Rename-Item -LiteralPath $dest -NewName ((Split-Path -Leaf $dest) + '.bk_' + $Stamp)
+      $bk = $dest + '.bk_' + $Stamp
+      Rename-Item -LiteralPath $dest -NewName (Split-Path -Leaf $bk)
     }
-    New-Item -ItemType Directory -Force -Path (Split-Path -Parent $dest) | Out-Null
-    Move-Item -LiteralPath (Join-Path $tmp $inner) -Destination $dest
+    try {
+      Move-Item -LiteralPath $src -Destination $dest
+    } catch {
+      # 入れ替えに失敗したら、退避した前の版を元の名前に戻す(旧版が .bk_ のまま消えないように)
+      if ($bk -and (Test-Path -LiteralPath $bk) -and -not (Test-Path -LiteralPath $dest)) {
+        Rename-Item -LiteralPath $bk -NewName (Split-Path -Leaf $dest)
+      }
+      throw
+    }
     Set-Content -LiteralPath (Join-Path $dest '.tenv-version') -Value $version -Encoding ascii
   } finally {
     Remove-Item -LiteralPath $tmp -Recurse -Force -ErrorAction SilentlyContinue
@@ -302,10 +315,10 @@ if ($linked) {
 if (Test-Path -LiteralPath $LocalLua) {
   Say ok "wezterm\local.lua がある"
 } elseif ($Check) {
-  Say todo 'wezterm\local.lua が無い(local.example.lua を写して書き換える)'
+  Say todo 'wezterm\local.lua が無い(実行すると local.example.lua から作る)'
 } else {
   Copy-Item -LiteralPath (Join-Path $Repo 'wezterm\local.example.lua') -Destination $LocalLua
-  Say done 'wezterm\local.lua を見本から作った(自分の環境の値に書き換える。README の「設定」)'
+  Say done 'wezterm\local.lua を見本から作った(このままでも既定値で動く。変えるなら README の「設定」)'
 }
 
 # 8. 依存(winget で入れるもの)

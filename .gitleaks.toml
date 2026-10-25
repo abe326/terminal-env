@@ -5,5 +5,5 @@ useDefault = true
 [allowlist]
 description = "検出用の正規表現"
 paths = [
-  '''scripts/check_public\.py''',
+  '''^scripts/check_public\.py$''',
 ]

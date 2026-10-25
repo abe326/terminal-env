@@ -185,7 +185,8 @@ def main(argv: list[str]) -> int:
         ng += bool(hits)
         ok += not hits
     if args.history:
-        log = git("log", "--all", "-p", "--no-color", "--format=commit %H%n%an <%ae>%n%B", root=root)
+        # author だけでなく committer のメールも見る（Web 編集・rebase で入る）
+        log = git("log", "--all", "-p", "--no-color", "--format=commit %H%n%an <%ae>%n%cn <%ce>%n%B", root=root)
         # 作業ツリーで例外にしたファイルの差分は形式検査を外す（個人語は見る）
         chunks = re.split(r"(?m)^(?=commit [0-9a-f]{40}$|diff --git )", log)
         hist_hits = []

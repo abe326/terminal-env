@@ -867,12 +867,14 @@ for _, e in ipairs({
   "appx", "msix", "appinstaller", "library-ms", "search-ms", "xll", "sys", "dll", "ocx",
   "ps2", "ps2xml", "psc2", "msh", "msh1", "msh2", "mshxml", "msh1xml", "msh2xml", "sct", "wsc", "shs", "shb",
   "hlp", "jnlp", "diagcab", "wsb", "website", "searchconnector-ms", "theme", "themepack", "desktopthemepack",
-  "rdp", "ica", "xbap",
+  "rdp", "ica", "xbap", "wll", "vsto", "appxbundle", "msixbundle",
 }) do OPEN_POLICY[e] = "block" end
 for _, e in ipairs({
   "py", "pyw", "pyz", "pyzw", "pyc", "pyo", "sh", "bash", "zsh", "ksh", "csh", "pl", "rb", "php", "tcl",
   "docm", "dotm", "xlsm", "xltm", "xlsb", "xlam", "xla", "pptm", "potm", "ppsm", "ppam", "sldm",
   "mdb", "mde", "accdb", "accde", "accda", "ade", "adp", "slk", "iqy", "one", "onepkg",
+  -- 旧形式の Office(マクロを持てる)と rtf(OLE 埋め込み)
+  "doc", "dot", "xls", "xlt", "ppt", "pot", "pps", "rtf",
 }) do OPEN_POLICY[e] = "caution" end
 
 -- path(リモートの / か Windows の \ 区切り)を開くときの扱い
@@ -887,7 +889,8 @@ end
 --   ・名前の末尾の . と空白(Windows は落とす。evil.exe. が evil.exe として開かれ、拡張子の確認をすり抜ける)
 --   ・制御文字(改行など)
 local function safe_remote_path(p)
-  if p:find('[%c\\:"<>|%?%*]') then return false end
+  -- % は Windows が環境変数として展開する(名前と違うファイルを開かせられる)ので弾く
+  if p:find('[%c\\:"<>|%?%*%%]') then return false end
   for part in p:gmatch("[^/]+") do
     if part:match("[%. ]$") then return false end
   end
@@ -998,6 +1001,12 @@ end
 local function open_checked(window, pane, path, do_open)
   local policy, ext = open_policy(path)
   local name = path:match("([^/\\]+)$") or path
+  if ext == "" then
+    -- 拡張子が無い名前は、Windows が種類を補って別のファイル(payload に対する payload.cmd など)を実行しうるので開かない
+    window:toast_notification("WezTerm", "拡張子が無いので開きません(種類を補って別のものが実行されるのを防ぐため): "
+      .. name .. "(中を見るならツリーのダブルクリック、場所を見るなら「エクスプローラー」)", nil, 7000)
+    return
+  end
   if policy == "block" then
     window:toast_notification("WezTerm", "." .. ext .. " は Windows で開くと実行される種類なので開きません: " .. name
       .. "(中を見るならツリーのダブルクリック、場所を見るなら「エクスプローラー」)", nil, 7000)
@@ -1025,7 +1034,7 @@ wezterm.on("open-uri", function(window, pane, uri)
   if file then
     file = file:gsub("%%(%x%x)", function(h) return string.char(tonumber(h, 16)) end)
     file = file:gsub("^/(%a:)", "%1"):gsub("/", "\\")
-    if file:match("^%a:\\") and not file:find('[%c"<>|%?%*]') and not file:sub(3):find(":", 1, true)
+    if file:match("^%a:\\") and not file:find('[%c"<>|%?%*%%]') and not file:sub(3):find(":", 1, true)
       and not file:match("[%. ]$") then
       open_checked(window, pane, file, function() wezterm.open_with(file) end)
       return false
@@ -1097,23 +1106,39 @@ wezterm.on("user-var-changed", function(window, pane, name, value)
     -- 鍵や認証の情報の置き場所(.ssh・.gnupg・.aws・.azure・.kube・.docker・Windows の資格情報・この仕組みの合言葉)は送らない
     local dest, files, refused = nil, {}, 0
     local SECRET_DIR = { [".ssh"] = true, [".gnupg"] = true, [".aws"] = true, [".azure"] = true, [".kube"] = true,
-      [".docker"] = true }
+      [".docker"] = true, [".claude"] = true, [".config"] = true, [".password-store"] = true }
     local SECRET_PATH = { "\\appdata\\roaming\\microsoft\\credentials\\", "\\appdata\\local\\microsoft\\credentials\\",
-      "\\appdata\\roaming\\microsoft\\protect\\", "\\appdata\\local\\tenv\\" }
+      "\\appdata\\roaming\\microsoft\\protect\\", "\\appdata\\local\\tenv\\",
+      "\\.git-credentials\\", "\\.netrc\\", "\\.pgpass\\", "\\.npmrc\\",
+      "\\appdata\\local\\google\\chrome\\user data\\", "\\appdata\\local\\microsoft\\edge\\user data\\",
+      "\\appdata\\roaming\\mozilla\\" }
+    -- ホーム・ドライブ直下・AppData など、丸ごと送ると鍵や認証の情報ごと再帰で送られる場所(ちょうどその階層)
+    local DANGER_ROOT = { "^%a:$", "^%a:\\users$", "^%a:\\users\\[^\\]+$",
+      "^%a:\\users\\[^\\]+\\appdata$", "^%a:\\users\\[^\\]+\\appdata\\local$",
+      "^%a:\\users\\[^\\]+\\appdata\\locallow$", "^%a:\\users\\[^\\]+\\appdata\\roaming$",
+      "^%a:\\windows$", "^%a:\\programdata$" }
+    -- 送り元を送ってよいか(鍵や認証の置き場所・丸ごと危険な場所・短い名前ですり抜けるものを断る)
+    local function refuse_src(line)
+      if not (line:match("^%a:[\\/]") or line:match("^\\\\[^\\]")) then return true end
+      if line:find('[%c"<>|%?%*]') or line:sub(3):find(":", 1, true) then return true end
+      -- 小文字・/ を \・各部品の末尾の . と空白を外す(.ssh. ですり抜けさせない)・\ の重複と末尾を外す
+      local norm = line:lower():gsub("/", "\\"):gsub("([^\\]+)", function(p) return (p:gsub("[%. ]+$", "")) end)
+      norm = norm:gsub("\\+", "\\"):gsub("\\+$", "")
+      for part in norm:gmatch("[^\\]+") do
+        if SECRET_DIR[part] or part:match("~%d+$") then return true end -- 鍵の置き場所 / 8.3 の短い名前
+      end
+      local probe = norm .. "\\"
+      for _, s in ipairs(SECRET_PATH) do if probe:find(s, 1, true) then return true end end
+      for _, pat in ipairs(DANGER_ROOT) do if norm:match(pat) then return true end end
+      return false
+    end
     for line in path:gmatch("[^\n]+") do
       if not dest then
         dest = line
+      elseif refuse_src(line) then
+        refused = refused + 1
       else
-        local ok = (line:match("^%a:[\\/]") or line:match("^\\\\[^\\]")) and not line:find('[%c"<>|%?%*]')
-          and not line:sub(3):find(":", 1, true)
-        for part in line:gmatch("[^\\/]+") do
-          if SECRET_DIR[part:lower()] then ok = false end
-        end
-        local low = line:lower():gsub("/", "\\") .. "\\"
-        for _, s in ipairs(SECRET_PATH) do
-          if low:find(s, 1, true) then ok = false end
-        end
-        if ok then table.insert(files, line) else refused = refused + 1 end
+        table.insert(files, line)
       end
     end
     if refused > 0 then

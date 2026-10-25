@@ -8,7 +8,7 @@
 
 | 名前 | 用途 | ライセンス | 公式の配布元 |
 |---|---|---|---|
-| WezTerm | ターミナル | MIT | <https://wezterm.org> / <https://github.com/wez/wezterm> |
+| WezTerm | ターミナル | MIT | <https://wezterm.org> / <https://github.com/wezterm/wezterm> |
 | Neovim | ツリー・エディタ | Apache-2.0(一部 Vim License) | <https://neovim.io> / <https://github.com/neovim/neovim> |
 | UDEV Gothic NF | フォント | SIL Open Font License 1.1 | <https://github.com/yuru7/udev-gothic> |
 | Git(Windows では Git for Windows) | プラグインの取得・Git の状態・hook を動かす bash | GPL-2.0 | <https://git-scm.com> / <https://gitforwindows.org> |
@@ -31,7 +31,7 @@
 | PowerShell 7 | 入っていれば、この PC の pane のシェルに使う(無ければ Windows 標準の PowerShell 5.1) | MIT | <https://github.com/PowerShell/PowerShell> |
 | OpenSSH | リモートへの接続 | BSD 系(Windows 標準の機能) | Windows の「オプション機能」 |
 | lazygit | Git の操作画面 | MIT | <https://github.com/jesseduffield/lazygit> |
-| Mutagen | ファイルの同期(右上の同期の状態) | MIT。ただし v0.17 以降の公式ビルドには SSPL のコードを含む | <https://github.com/mutagen-io/mutagen> |
+| Mutagen | ファイルの同期(右上の同期の状態) | MIT。ただし版によっては公式ビルドに SSPL のコードを含む(使う場合は版のライセンスを確認してください) | <https://github.com/mutagen-io/mutagen> |
 | Claude Code | タブの状態表示(hook) | Anthropic の利用規約 | <https://code.claude.com/docs> |
 
 ## その他

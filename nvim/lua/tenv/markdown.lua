@@ -154,6 +154,26 @@ _G.TenvMdSet = function(on)
   M.set(vim.api.nvim_get_current_buf(), on == 1)
 end
 
+-- プレビューで上へスクロールするときは、カーソルを窓の上端へ移してから送る。
+-- 窓に収まらない表は、render-markdown が元の行を隠して仮想行で描く(セルの折り返し)。その上を上へ
+-- スクロールすると、Neovim は下端に残ったカーソルを画面に収めようとして表示を戻し、途中で止まる
+local function scroll_up(win, count)
+  vim.api.nvim_win_call(win, function()
+    vim.api.nvim_win_set_cursor(win, { vim.fn.line("w0"), 0 })
+    vim.cmd("normal! " .. count .. "\25") -- \25 = Ctrl+Y
+  end)
+end
+
+local function wheel_up()
+  local win = vim.fn.getmousepos().winid
+  if win ~= 0 and vim.b[vim.api.nvim_win_get_buf(win)].tenv_preview then
+    local n = tonumber(vim.o.mousescroll:match("ver:(%d+)")) or 3
+    if n > 0 then scroll_up(win, n) end
+  else
+    vim.api.nvim_feedkeys(vim.keycode("<ScrollWheelUp>"), "n", false)
+  end
+end
+
 function M.setup()
   set_hl()
   vim.api.nvim_create_autocmd("ColorScheme", { callback = set_hl })
@@ -167,6 +187,10 @@ function M.setup()
       end)
       vim.keymap.set("n", "<leader>v", function() M.set(ev.buf, not vim.b[ev.buf].tenv_preview) end,
         { buffer = ev.buf, desc = "プレビュー / 原文" })
+      vim.keymap.set("n", "<ScrollWheelUp>", wheel_up, { buffer = ev.buf })
+      vim.keymap.set("n", "<C-y>", function()
+        if vim.b[ev.buf].tenv_preview then scroll_up(0, vim.v.count1) else vim.cmd("normal! " .. vim.v.count1 .. "\25") end
+      end, { buffer = ev.buf })
     end,
   })
   vim.api.nvim_create_autocmd({ "BufWinEnter", "TextChanged", "InsertLeave", "WinResized" }, {

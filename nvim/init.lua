@@ -50,6 +50,8 @@ o.expandtab = true
 o.shiftwidth = 2
 o.tabstop = 2
 o.scrolloff = 4
+-- ファイルの中の「vim の設定の行」(modeline)は読まない(信用できないフォルダのファイルを開くため。リモートの編集でも切っている)
+o.modeline = false
 
 -- ツリー専用 pane は最下段の入力行を出さない(メッセージは右下に浮かべる。Neovim 0.12 の ui2)
 if tree_only then
@@ -98,7 +100,8 @@ local function new_tab(dir, argv, title, new_window)
     if new_window then table.insert(cmd, "--new-window") end
     table.insert(cmd, "--")
     if argv[1] == "nvim" then
-      argv = vim.list_extend({ "nvim", "--cmd", "let g:tenv_not_tree = 1" }, vim.list_slice(argv, 2))
+      -- 絶対パスで起動する(開いたフォルダに置かれた nvim.exe を拾わない)
+      argv = vim.list_extend({ vim.v.progpath, "--cmd", "let g:tenv_not_tree = 1" }, vim.list_slice(argv, 2))
     end
     vim.system(vim.list_extend(cmd, argv), {}, function(r)
       local id = vim.trim(r.stdout or "")
@@ -113,8 +116,24 @@ local function new_tab(dir, argv, title, new_window)
   end
 end
 
+-- Windows で「アプリで開く」。Windows が名前を補ったり環境変数を展開したりして、名前と違うファイルを
+-- 実行しないようにする(名前どおりのものが無ければ開かない / % を含む名前は開かない / cmd.exe を通さない)
+local function open_on_windows(path)
+  if not vim.uv.fs_stat(path) then
+    require("tenv.dialog").toast("見つかりません: " .. vim.fn.fnamemodify(path, ":t"))
+    return
+  end
+  if path:find("%%") then
+    require("tenv.dialog").toast("% を含む名前は Windows では開けません(ツリーのダブルクリックで開けます): "
+      .. vim.fn.fnamemodify(path, ":t"))
+    return
+  end
+  -- rundll32 の FileProtocolHandler は、cmd.exe を通さず、名前どおりのファイルを開く(名前の & で別の命令が動かない)
+  vim.system({ "rundll32.exe", "url.dll,FileProtocolHandler", path })
+end
+
 function A.system_open(path)
-  if is_win then vim.ui.open(path) else wopen({ path }) end
+  if is_win then open_on_windows(path) else wopen({ path }) end
 end
 
 function A.reveal(path)
@@ -148,7 +167,7 @@ function A.git(path)
     vim.notify("lazygit が見つかりません(README の導入手順を参照)", vim.log.levels.WARN)
     return
   end
-  if is_win then new_tab(dir_of(path), { "lazygit" }, "Git: " .. vim.fn.fnamemodify(dir_of(path), ":t")) else wopen({ "--git", dir_of(path) }) end
+  if is_win then new_tab(dir_of(path), { vim.fn.exepath("lazygit") }, "Git: " .. vim.fn.fnamemodify(dir_of(path), ":t")) else wopen({ "--git", dir_of(path) }) end
 end
 
 -- 設定(WezTerm の local.lua)。設定は手元の Windows にある
@@ -200,6 +219,12 @@ local lazypath = vim.fn.stdpath("data") .. "/lazy/lazy.nvim"
 if not vim.uv.fs_stat(lazypath) then
   vim.fn.system({ "git", "clone", "--filter=blob:none", "--branch=stable",
     "https://github.com/folke/lazy.nvim.git", lazypath })
+  -- lazy.nvim 本体も lazy-lock.json の版に固定する(stable ブランチの先頭に勝手に追従しない)
+  local ok, lock = pcall(function() return vim.json.decode(table.concat(vim.fn.readfile(lockfile), "\n")) end)
+  local commit = ok and type(lock) == "table" and type(lock["lazy.nvim"]) == "table" and lock["lazy.nvim"].commit
+  if type(commit) == "string" and commit:match("^%x+$") then
+    vim.fn.system({ "git", "-C", lazypath, "checkout", "--quiet", commit })
+  end
 end
 vim.opt.rtp:prepend(lazypath)
 
@@ -387,8 +412,14 @@ require("lazy").setup({
 ----------------------------------------------------------------
 local function dropped_paths(text)
   local paths = {}
-  for p in text:gmatch('"(%a:[\\/][^"]*)"') do table.insert(paths, p) end
-  for p in text:gmatch('"(\\\\[^"]+)"') do table.insert(paths, p) end
+  -- 貼り付けられた文字列から配置するのは、制御文字を含まず・.. を含まず・実在するパスだけ
+  local function add(p)
+    if p:find("%c") then return end
+    for seg in p:gmatch("[^\\/]+") do if seg == ".." then return end end
+    if vim.uv.fs_stat(p) then table.insert(paths, p) end
+  end
+  for p in text:gmatch('"(%a:[\\/][^"]*)"') do add(p) end
+  for p in text:gmatch('"(\\\\[^"]+)"') do add(p) end
   return paths
 end
 

@@ -64,9 +64,12 @@ local function config_path(top)
   if st and st.type == "directory" then return dotgit .. "/config" end
   local gitdir = (read(dotgit) or ""):match("gitdir:%s*(.-)%s*$")
   if not gitdir then return nil end
+  -- .git ファイルの gitdir が UNC(ネットワークの場所)を指すときは読まない(開いただけで SMB 接続・認証が走る)
+  if gitdir:match("^[/\\][/\\]") then return nil end
   if not gitdir:match("^/") and not gitdir:match("^%a:[\\/]") then gitdir = top .. "/" .. gitdir end
   local common = vim.trim(read(gitdir .. "/commondir") or "")
   if common ~= "" then
+    if common:match("^[/\\][/\\]") then return nil end
     if not common:match("^/") and not common:match("^%a:[\\/]") then common = gitdir .. "/" .. common end
     return common .. "/config"
   end
