@@ -127,6 +127,8 @@ function M.list(days)
           local st = uv.fs_stat(path)
           if st and st.mtime.sec >= since then
             local d = describe(path)
+            -- 作業フォルダがもう無い会話は再開できない(フォルダの移動後に旧い保存先と二重に出るのも防ぐ)
+            if d and not uv.fs_stat(d.cwd) then d = nil end
             if d then
               d.id, d.mtime = id, st.mtime.sec
               d.running = running[id] ~= nil

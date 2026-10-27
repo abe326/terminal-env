@@ -1,5 +1,9 @@
 # Changelog
 
+## 未リリース
+
+- 再開の一覧(Shift+Alt+R)で、作業フォルダがもう無い会話を出さないようにした(フォルダを移した後に旧い保存先と二重に出るのを防ぐ)
+
 ## 0.2.0 — 2026-10-25
 
 - Windows の導入に管理者権限を要らなくした。`scripts/install-windows.ps1`(PowerShell 5.1 で動く)が WezTerm・Neovim の公式 zip 版とフォントを自分のユーザーだけに入れ、設定をつなぐ。`-Check` で確かめるだけもできる
