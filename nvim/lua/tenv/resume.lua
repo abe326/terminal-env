@@ -11,7 +11,8 @@
 --   TENV_RESUME(WezTerm が渡す JSON):
 --     { mode, days, resume, startup_resume, startup_folders,
 --       remotes = { { i, name, host, list } },   list = フォルダを一覧するコマンド(wezterm.lua の remote_list_cmd)
---       folders = { { root, items = { { path, name, t } } } } }   この PC のフォルダ
+--       folders = { { root, items = { { path, name, t } } } },   この PC のフォルダ
+--       host_labels = { remote, local } }   フォルダの一覧の接続先の見出し(Linux / ローカルPC)
 local M = {}
 
 local ns = vim.api.nvim_create_namespace("tenv_resume")
@@ -176,17 +177,36 @@ function M.run()
 
     if view == "folders" then
       add(" ↑↓: 選ぶ   Enter・クリック: 開く   Esc: 閉じる", "TenvResumeDim")
+      -- 3 段の字下げ: 接続先(Linux / ローカルPC)> 一覧の場所(親フォルダの名前と場所)> フォルダ(wezterm.lua と同じ)
       frows = {}
+      local labels = req.host_labels or {}
+      local nrem = #(req.remotes or {})
+      local last_host
       for _, g in ipairs(fgroups) do
-        add("")
-        local gl = " " .. (g.remote and "󰒋 " or "󰍹 ") .. g.name
-        add(gl .. "  " .. (g.error or g.root or ""), "TenvResumeGroup")
-        table.insert(marks, { #lines - 1, #gl, #lines[#lines], "TenvResumeDim" })
-        if g.loading then add("    (読み込んでいます…)", "TenvResumeDim")
-        elseif #g.items == 0 and not g.error then add("    (ありません)", "TenvResumeDim") end
+        local host = g.remote or "L"
+        if host ~= last_host then
+          last_host = host
+          add("")
+          local hl = " " .. (g.remote and ("󰒋 " .. (labels.remote or "Linux")) or ("󰍹 " .. (labels["local"] or "ローカルPC")))
+          -- 接続先の名前は、リモートが 2 台以上のときだけ添える
+          local note = g.remote and nrem > 1 and g.name or nil
+          if g.error then note = (note and note .. "  " or "") .. g.error end
+          add(hl .. (note and "  " .. note or ""))
+          table.insert(marks, { #lines - 1, 0, #hl, "TenvResumeGroup" })
+          table.insert(marks, { #lines - 1, #hl, #lines[#lines], "TenvResumeDim" })
+        end
+        if g.loading then add("       (読み込んでいます…)", "TenvResumeDim") end
+        if g.root then
+          local pname = g.root:match("([^/\\]+)[/\\]*$") or g.root
+          local pl = "    󰉋 " .. pname .. string.rep(" ", math.max(2, 16 - vim.fn.strdisplaywidth(pname)))
+          add(pl .. g.root)
+          table.insert(marks, { #lines - 1, 0, #pl, "TenvResumeGroup" })
+          table.insert(marks, { #lines - 1, #pl, #lines[#lines], "TenvResumeDim" })
+          if #g.items == 0 then add("        (ありません)", "TenvResumeDim") end
+        end
         for _, it in ipairs(g.items) do
           local t = it.t and when(it.t) or ""
-          local line = "    " .. fit(it.name, 34) .. "  " .. t
+          local line = "        " .. fit(it.name, 32) .. "  " .. t
           table.insert(lines, line)
           it.lnum = #lines - 1
           it.remote = g.remote

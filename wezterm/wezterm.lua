@@ -1308,19 +1308,34 @@ local function local_last_prompt(path)
   return t
 end
 
--- 一覧の 1 行: アイコン + フォルダ名 + 指示を出した日時(控えめな色)
-local function folder_label(icon, name, epoch)
-  local pad = math.max(2, 34 - wezterm.column_width(name))
+-- フォルダの一覧は 3 段の字下げ: 接続先(Linux / ローカルPC)> 一覧の場所(親フォルダの名前と場所)> フォルダ
+-- (再開の画面のフォルダの一覧も同じ見出しを使う。open_resume_picker で渡す)
+local HOST_LABELS = { remote = "Linux", ["local"] = "ローカルPC" }
+
+-- 接続先の行。note: リモートが 2 台以上のときの名前・つながらないときの理由
+local function host_label(icon, name, note)
   return wezterm.format({
-    { Foreground = { Color = T.fg } }, { Text = icon .. "  " .. name .. string.rep(" ", pad) },
-    { Foreground = { Color = T.dim } }, { Text = when_label(epoch) },
+    { Foreground = { Color = T.accent } }, { Attribute = { Intensity = "Bold" } }, { Text = icon .. " " .. name },
+    { Attribute = { Intensity = "Normal" } }, { Foreground = { Color = T.dim } }, { Text = note and ("  " .. note) or "" },
   })
 end
 
-local function group_label(icon, name, where)
+-- 一覧の場所の行: 親フォルダの名前 + 場所(控えめな色)
+local function root_label(root)
+  local name = root:match("([^\\/]+)[\\/]*$") or root
+  local pad = math.max(2, 16 - wezterm.column_width(name))
   return wezterm.format({
-    { Foreground = { Color = T.accent } }, { Attribute = { Intensity = "Bold" } }, { Text = icon .. " " .. name },
-    { Attribute = { Intensity = "Normal" } }, { Foreground = { Color = T.dim } }, { Text = "  " .. where },
+    { Foreground = { Color = T.accent } }, { Text = "   " .. nf.md_folder .. " " .. name .. string.rep(" ", pad) },
+    { Foreground = { Color = T.dim } }, { Text = root },
+  })
+end
+
+-- フォルダの行: フォルダ名 + 指示を出した日時(控えめな色)
+local function folder_label(name, epoch)
+  local pad = math.max(2, 32 - wezterm.column_width(name))
+  return wezterm.format({
+    { Foreground = { Color = T.fg } }, { Text = "       " .. name .. string.rep(" ", pad) },
+    { Foreground = { Color = T.dim } }, { Text = when_label(epoch) },
   })
 end
 
@@ -1337,21 +1352,22 @@ end
 
 local function remote_choices(choices, ri, rem)
   local ok, out = wezterm.run_child_process({ "ssh", "-o", "ConnectTimeout=5", "--", rem.host, remote_list_cmd(rem) })
-  if not ok then
-    table.insert(choices, { id = "-", label = group_label(nf.md_server_network, rem.name, "(つながりません)") })
-    return
-  end
+  -- 接続先の名前は、リモートが 2 台以上のときだけ添える(見分けるため)
+  local note = #S.remotes > 1 and rem.name or nil
+  if not ok then note = (note and note .. "  " or "") .. "(つながりません)" end
+  table.insert(choices, { id = "-", label = host_label(nf.md_server_network, HOST_LABELS.remote, note) })
+  if not ok then return end
   -- フォルダ名はリモート由来。改行や制御文字を含む名前(偽の行を作れる)と、一覧の場所の外を指すものは出さない
   local root
   for line in out:gmatch("[^\r\n]+") do
     local path, t = line:match("^(.-)\t(.*)$")
     if path == "#" then
       root = t
-      table.insert(choices, { id = "-", label = group_label(nf.md_server_network, rem.name, t) })
+      table.insert(choices, { id = "-", label = root_label(t) })
     elseif path and root and starts_with(path, root .. "/") and not path:find("%c") then
       local name = path:match("([^/]+)$")
       if name and not name:match("^[_.]") then
-        table.insert(choices, { id = "R" .. ri .. "\t" .. path, label = folder_label(nf.md_server_network, name, tonumber(t)) })
+        table.insert(choices, { id = "R" .. ri .. "\t" .. path, label = folder_label(name, tonumber(t)) })
       end
     end
   end
@@ -1377,10 +1393,11 @@ local function local_folders()
 end
 
 local function local_choices(choices)
+  table.insert(choices, { id = "-", label = host_label(nf.md_monitor, HOST_LABELS["local"]) })
   for _, g in ipairs(local_folders()) do
-    table.insert(choices, { id = "-", label = group_label(nf.md_monitor, "この PC", g.root) })
+    table.insert(choices, { id = "-", label = root_label(g.root) })
     for _, it in ipairs(g.items) do
-      table.insert(choices, { id = "L\t" .. it.path, label = folder_label(nf.md_monitor, it.name, it.t) })
+      table.insert(choices, { id = "L\t" .. it.path, label = folder_label(it.name, it.t) })
     end
   end
 end
@@ -1457,7 +1474,7 @@ local function open_resume_picker(mux_win, mode)
       "-c", "lua require('tenv.resume').run()" },
     set_environment_variables = {
       TENV_RESUME = wezterm.json_encode({
-        mode = mode, days = S.claude_resume_days, remotes = remotes, folders = local_folders(),
+        mode = mode, days = S.claude_resume_days, remotes = remotes, folders = local_folders(), host_labels = HOST_LABELS,
         resume = S.claude_resume and true or false,
         startup_resume = (S.claude_resume and S.claude_resume_on_startup) and true or false,
         startup_folders = S.open_on_startup and true or false,
