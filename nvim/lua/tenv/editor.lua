@@ -83,17 +83,57 @@ local function tmux_split_editor(main, dir, cmd)
   return pane
 end
 
--- WezTerm: 同じ並びを、窓の全幅で上段に作ってから(--top-level)、ツリーを左端の全高に移して(--move-pane-id)作る
+-- WezTerm: 同じ並びを、pane を 1 つずつ動かして作る。--top-level とツリーの移動は使わない
+--   (WezTerm 20240203 では、--top-level で作った pane が新しい大きさに resize されず、タブが覚えている
+--   大きさも縮んだまま戻らないので、そのあとの操作で全体が崩れる)
+--   1. main の上にエディタを作る(普通の分割。右側が左右に割れていると、この時点では main の上だけ)
+--   2. 右側の他の pane を、いったん同じ窓の新しいタブへ出す(move-pane-to-new-tab。タブは切り替わらない)。
+--      右側が main だけになるので、エディタは右側の全幅に広がる
+--   3. 出した pane を、main の右に元の並び・元の幅で戻す(split-pane --right --cells <幅> --move-pane-id。
+--      --cells は「その pane と、それより右の全部」の幅にする。戻す先の pane はその分だけ広く作ってある。
+--      空になったタブは WezTerm が消す)
+--   右側が左右の並び(全部が上段 0 から同じ高さ)でないときは、組み替えずに main の上に作るだけ
 local function wezterm_split_editor(main, dir, argv)
-  local cols = vim.o.columns -- ツリーの幅(作る前に読む)
-  local r = vim.system(vim.list_extend(
-    { wezterm_cli(), "cli", "split-pane", "--pane-id", main, "--top", "--top-level", "--percent", "62", "--cwd", dir, "--" }, argv)):wait()
+  local function cli(args) return vim.system(vim.list_extend({ wezterm_cli(), "cli" }, args)):wait() end
+  local others = {} -- 右側の main 以外の pane(左から順)
+  local ok, panes = pcall(vim.json.decode, cli({ "list", "--format", "json" }).stdout or "")
+  if ok and type(panes) == "table" then
+    local tab, rows
+    for _, p in ipairs(panes) do
+      if tostring(p.pane_id) == main then tab, rows = p.tab_id, p.size and p.size.rows end
+    end
+    local flat = tab ~= nil
+    for _, p in ipairs(panes) do
+      if p.tab_id == tab then
+        if p.top_row ~= 0 or not p.size or p.size.rows ~= rows or p.is_zoomed then flat = false end
+        if tostring(p.pane_id) ~= main and tostring(p.pane_id) ~= (vim.env.WEZTERM_PANE or "") then
+          table.insert(others, { id = tostring(p.pane_id), left = p.left_col or 0, cols = p.size and p.size.cols or 0 })
+        end
+      end
+    end
+    if not flat then others = {} end
+    table.sort(others, function(a, b) return a.left < b.left end)
+  end
+
+  local r = cli(vim.list_extend({ "split-pane", "--pane-id", main, "--top", "--percent", "62", "--cwd", dir, "--" }, argv))
   local pane = vim.trim(r.stdout or "")
   if r.code ~= 0 or pane == "" then return nil end
-  local tree = vim.env.WEZTERM_PANE
-  if vim.env.NVIM_TREE_ONLY == "1" and vim.g.tenv_editor ~= 1 and vim.g.tenv_not_tree ~= 1 and tree and tree ~= "" then
-    vim.system({ wezterm_cli(), "cli", "split-pane", "--pane-id", pane, "--left", "--top-level", "--cells", tostring(cols),
-      "--move-pane-id", tree }):wait()
+
+  local parked, total = {}, 0 -- 出した pane と、その幅の合計(境目込み)
+  for _, o in ipairs(others) do
+    if cli({ "move-pane-to-new-tab", "--pane-id", o.id }).code == 0 then
+      table.insert(parked, o)
+      total = total + o.cols + 1
+    end
+  end
+  local prev = main
+  for _, o in ipairs(parked) do
+    local cells = tostring(total - 1) -- この pane と、それより右の全部の幅
+    total = total - o.cols - 1
+    if cli({ "split-pane", "--pane-id", prev, "--right", "--cells", cells, "--move-pane-id", o.id }).code ~= 0 then
+      cli({ "split-pane", "--pane-id", prev, "--right", "--move-pane-id", o.id }) -- 幅が入らないときは半分で戻す
+    end
+    prev = o.id
   end
   return pane
 end
