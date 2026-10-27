@@ -18,6 +18,9 @@ return {
   -- open_with_tree = true,
   -- WezTerm を起動した最初の画面にもツリーを出すか(省略時 true)
   -- tree_on_startup = true,
+  -- WezTerm を起動したとき、フォルダを開く一覧(Shift+Alt+O と同じ)を出すか(省略時 true)
+  --   「前の作業」の画面に出し、前回開いていた作業があれば再開の一覧を先に出す(Tab で切り替え)
+  -- open_on_startup = true,
   -- ツリーの幅(桁数)。開くときはいつもこの幅(省略時 34)
   -- tree_width = 34,
   -- ツリーの幅を固定するか(省略時 true)

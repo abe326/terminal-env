@@ -36,6 +36,9 @@ local S = {
   claude_resume = true,
   -- WezTerm を起動したとき、前回開いていた作業があれば、再開の画面を出すか
   claude_resume_on_startup = true,
+  -- WezTerm を起動したとき、フォルダを開く画面(Shift+Alt+O と同じ一覧)を出すか。
+  -- 再開の画面と同じ画面に出し、Tab で切り替える(前回開いていた作業があれば、再開の方を先に出す)
+  open_on_startup = true,
   -- 再開の画面に出す会話: この日数以内に使ったもの
   claude_resume_days = 3,
 
@@ -1321,14 +1324,19 @@ local function group_label(icon, name, where)
   })
 end
 
--- リモートのフォルダ(projects_root の直下)と、指示を出した日時を 1 回の ssh でまとめて取る
-local function remote_choices(choices, ri, rem)
+-- リモートのフォルダ(projects_root の直下)と、指示を出した日時を 1 回の ssh でまとめて取るコマンド。
+-- 出力は「#<TAB>一覧の場所」の行と、その下に「フォルダ<TAB>日時」の行(再開の画面 resume.lua も同じ形で読む)
+local function remote_list_cmd(rem)
   local roots = {}
   for _, r in ipairs(rem.projects_root) do table.insert(roots, r == "~" and "~" or sh_quote(r)) end
   local script = "st=${XDG_STATE_HOME:-$HOME/.local/state}/tenv/last-prompt; for r in " .. table.concat(roots, " ")
     .. "; do cd \"$r\" 2>/dev/null || continue; printf '#\\t%s\\n' \"$PWD\"; for d in */; do p=\"$PWD/${d%/}\";"
     .. " k=$(printf '%s' \"$p\" | tr 'A-Z' 'a-z' | sed 's#[/\\\\:]#%#g'); printf '%s\\t%s\\n' \"$p\" \"$(cat \"$st/$k\" 2>/dev/null)\"; done; done"
-  local ok, out = wezterm.run_child_process({ "ssh", "-o", "ConnectTimeout=5", "--", rem.host, remote_sh(script) })
+  return remote_sh(script)
+end
+
+local function remote_choices(choices, ri, rem)
+  local ok, out = wezterm.run_child_process({ "ssh", "-o", "ConnectTimeout=5", "--", rem.host, remote_list_cmd(rem) })
   if not ok then
     table.insert(choices, { id = "-", label = group_label(nf.md_server_network, rem.name, "(つながりません)") })
     return
@@ -1349,17 +1357,30 @@ local function remote_choices(choices, ri, rem)
   end
 end
 
-local function local_choices(choices)
+-- この PC のフォルダ(local_projects_root の直下)と、指示を出した日時: { { root, items = { { path, name, t } } } }
+local function local_folders()
   local roots = #S.local_projects_root > 0 and S.local_projects_root or { wezterm.home_dir }
+  local list = {}
   for _, root in ipairs(roots) do
     root = root:gsub("[\\/]$", "")
-    table.insert(choices, { id = "-", label = group_label(nf.md_monitor, "この PC", root) })
+    local items = {}
     for _, d in ipairs(wezterm.glob(root .. "\\*\\")) do
       local name = d:gsub("[\\/]$", ""):match("([^\\/]+)$")
       if name and not name:match("^[_.]") then
         local path = root .. "\\" .. name
-        table.insert(choices, { id = "L\t" .. path, label = folder_label(nf.md_monitor, name, local_last_prompt(path)) })
+        table.insert(items, { path = path, name = name, t = local_last_prompt(path) })
       end
+    end
+    table.insert(list, { root = root, items = items })
+  end
+  return list
+end
+
+local function local_choices(choices)
+  for _, g in ipairs(local_folders()) do
+    table.insert(choices, { id = "-", label = group_label(nf.md_monitor, "この PC", g.root) })
+    for _, it in ipairs(g.items) do
+      table.insert(choices, { id = "L\t" .. it.path, label = folder_label(nf.md_monitor, it.name, it.t) })
     end
   end
 end
@@ -1415,26 +1436,35 @@ local function select_tab(win, pane)
 end
 
 ----------------------------------------------------------------
--- 前の作業を再開(Claude Code)。画面は nvim(nvim/lua/tenv/resume.lua)が新しいタブで出す
---   mode = "startup": 起動時。画面のタブは裏で開き、前回開いていた作業があるときだけ前に出る(tenv_resume_show)。
---                    無ければ何も出さずに閉じる
+-- 前の作業を再開(Claude Code)。画面は nvim(nvim/lua/tenv/resume.lua)が新しいタブで出す。
+-- 同じ画面にフォルダを開く一覧(Shift+Alt+O と同じ)もあり、Tab で切り替える
+--   mode = "startup": 起動時。画面のタブは裏で開き、出すものがあるときだけ前に出る(tenv_resume_show)。
+--                    前回開いていた作業があれば再開(claude_resume_on_startup)、無ければフォルダの一覧
+--                    (open_on_startup)。どちらも無ければ何も出さずに閉じる
 --   mode = "manual" : Shift+Alt+R・「＋」から
 -- 選んだ結果は、合言葉付きで tenv_resume として返ってくる: { items = { { r = リモートの番号 | nil, cwd, ids } } }
+-- (フォルダを開くときは ids が空)
 ----------------------------------------------------------------
 local function open_resume_picker(mux_win, mode)
-  if not S.claude_resume then return end
   local remotes = {}
-  for i, r in ipairs(S.remotes) do table.insert(remotes, { i = i, name = r.name, host = r.host }) end
+  for i, r in ipairs(S.remotes) do
+    table.insert(remotes, { i = i, name = r.name, host = r.host, list = remote_list_cmd(r) })
+  end
   local prev = mux_win:active_tab()
   local tab = mux_win:spawn_tab({
     cwd = wezterm.home_dir,
     args = { "nvim", "--cmd", "let g:tenv_not_tree = 1", "--cmd", "let g:tenv_resume = 1",
       "-c", "lua require('tenv.resume').run()" },
     set_environment_variables = {
-      TENV_RESUME = wezterm.json_encode({ mode = mode, days = S.claude_resume_days, remotes = remotes }),
+      TENV_RESUME = wezterm.json_encode({
+        mode = mode, days = S.claude_resume_days, remotes = remotes, folders = local_folders(),
+        resume = S.claude_resume and true or false,
+        startup_resume = (S.claude_resume and S.claude_resume_on_startup) and true or false,
+        startup_folders = S.open_on_startup and true or false,
+      }),
     },
   })
-  tab:set_title("前の作業")
+  tab:set_title(S.claude_resume and "前の作業" or "フォルダを開く")
   if mode == "startup" and prev then pcall(function() prev:activate() end) end
 end
 
@@ -1521,8 +1551,8 @@ wezterm.on("gui-startup", function(cmd)
     toggle_tree_local(nil, pane)
     pane:activate()
   end
-  -- 前回開いていた Claude Code の作業があれば、再開の画面を出す
-  if S.claude_resume and S.claude_resume_on_startup then open_resume_picker(w, "startup") end
+  -- 前回開いていた Claude Code の作業があれば再開の画面を、無ければフォルダを開く画面を出す(同じ画面。Tab で切り替え)
+  if (S.claude_resume and S.claude_resume_on_startup) or S.open_on_startup then open_resume_picker(w, "startup") end
 end)
 
 local function cycle_theme()

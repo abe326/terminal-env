@@ -4,8 +4,14 @@
 --     claude --resume <会話> を動かす。リモートでまだ動いているものは、開き直すだけ
 --   ・前回開いていたもの(WezTerm を閉じた・機械を再起動したときに動いていたもの)には、最初からチェックが付く
 --   ・選んだ結果は、合言葉を付けて WezTerm に渡す(OSC 1337 SetUserVar=tenv_resume)。WezTerm がタブを開く
---   ・起動時(mode = startup)は、前回開いていたものが無ければ何も出さずに閉じる
---   TENV_RESUME(WezTerm が渡す JSON): { mode, days, remotes = { { i, name, host } } }
+--   ・同じ画面にフォルダを開く一覧(Shift+Alt+O と同じ)もあり、Tab で切り替える。選んだフォルダは
+--     tenv_resume で会話の無い(ids が空の)場所として渡す。WezTerm がいつもの並びで開く
+--   ・起動時(mode = startup)は、前回開いていたものがあれば再開(startup_resume)、無ければフォルダの一覧
+--     (startup_folders)を出す。どちらも無ければ何も出さずに閉じる
+--   TENV_RESUME(WezTerm が渡す JSON):
+--     { mode, days, resume, startup_resume, startup_folders,
+--       remotes = { { i, name, host, list } },   list = フォルダを一覧するコマンド(wezterm.lua の remote_list_cmd)
+--       folders = { { root, items = { { path, name, t } } } } }   この PC のフォルダ
 local M = {}
 
 local ns = vim.api.nvim_create_namespace("tenv_resume")
@@ -41,6 +47,7 @@ local function when(t)
   local hm = string.format("%d:%02d", d.hour, d.min)
   if t >= today then return "今日 " .. hm end
   if t >= today - 86400 then return "昨日 " .. hm end
+  if d.year ~= now.year then return string.format("%d/%d/%d", d.year, d.month, d.day) end
   return string.format("%d/%d %s", d.month, d.day, hm)
 end
 
@@ -70,14 +77,38 @@ local function classify(s, remote, startup)
   return "", false, true
 end
 
+-- リモートのフォルダの一覧(remote_list_cmd の出力)を見出しごとに分ける: { { root, items = { { path, name, t } } } }
+--   フォルダ名はリモート由来。制御文字を含む名前と、一覧の場所の外を指すものは出さない(wezterm.lua と同じ)
+local function parse_folders(out)
+  local list, cur = {}, nil
+  for line in out:gmatch("[^\r\n]+") do
+    local path, t = line:match("^(.-)\t(.*)$")
+    if path == "#" then
+      cur = { root = t, items = {} }
+      table.insert(list, cur)
+    elseif path and cur and path:sub(1, #cur.root + 1) == cur.root .. "/" and not path:find("%c") then
+      local name = path:match("([^/]+)$")
+      if name and not name:match("^[_.]") then table.insert(cur.items, { path = path, name = name, t = tonumber(t) }) end
+    end
+  end
+  return list
+end
+
 function M.run()
   set_hl()
   local req = vim.json.decode(vim.env.TENV_RESUME or "{}")
   local days = tonumber(req.days) or 3
   local startup = req.mode == "startup"
+  local has_resume = req.resume ~= false
+  -- いま出している方: "resume"(前の作業を再開)/ "folders"(フォルダを開く)
+  local view = has_resume and "resume" or "folders"
   local groups = {} -- { { name, remote_index, sessions } }
+  local loaded = false
   local pending = 0
   local rows, sel = {}, 1
+  -- フォルダの一覧: { { name, remote = リモートの番号 | nil, root, items, error, loading } }
+  local fgroups, fslots = {}, {}
+  local frows, fsel = {}, 1
   local buf = vim.api.nvim_get_current_buf()
   local win = vim.api.nvim_get_current_win()
 
@@ -101,9 +132,22 @@ function M.run()
     vim.api.nvim_buf_set_lines(buf, 0, -1, false, lines)
     vim.bo[buf].modifiable = false
   end
-  lines_set({ "", "  前の作業を読み込んでいます…" })
+  lines_set({ "", "  読み込んでいます…" })
 
-  local buttons = {}
+  -- 行を書き、色(marks: { 行, 始め, 終わり, 色 }。始めが -1 なら行全体)を付ける
+  local function paint(lines, marks)
+    lines_set(lines)
+    vim.api.nvim_buf_clear_namespace(buf, ns, 0, -1)
+    for _, m in ipairs(marks) do
+      if m[2] == -1 then
+        vim.api.nvim_buf_set_extmark(buf, ns, m[1], 0, { line_hl_group = m[4] })
+      else
+        vim.api.nvim_buf_set_extmark(buf, ns, m[1], m[2], { end_col = math.min(m[3], #lines[m[1] + 1]), hl_group = m[4] })
+      end
+    end
+  end
+
+  local buttons, heads = {}, {}
   local function render()
     local width = vim.api.nvim_win_get_width(win)
     local lines, marks = {}, {}
@@ -112,10 +156,65 @@ function M.run()
       if hl then table.insert(marks, { #lines - 1, 0, #text, hl }) end
       if row_hl then table.insert(marks, { #lines - 1, -1, -1, row_hl }) end
     end
-    add(fit(string.format(" 󰑓 前の作業を再開(Claude Code・%d 日以内)", days), width), "TenvResumeHead")
+    -- 見出し: 再開とフォルダの 2 つ(いま出している方を強く)。クリックでも切り替わる
+    heads = {}
+    local head = ""
+    local function head_item(name, label)
+      if #heads > 0 then head = head .. "  " end
+      local s0 = #head
+      head = head .. label
+      table.insert(heads, { s = s0, e = #head, view = name })
+    end
+    if has_resume then head_item("resume", string.format(" 󰑓 前の作業を再開(Claude Code・%d 日以内) ", days)) end
+    head_item("folders", " 󰉋 フォルダを開く ")
+    local hint = has_resume and "   Tab: 切り替え" or ""
+    table.insert(lines, head .. hint)
+    for _, h in ipairs(heads) do
+      table.insert(marks, { 0, h.s, h.e, h.view == view and "TenvResumeHead" or "TenvResumeBtn" })
+    end
+    table.insert(marks, { 0, #head, #head + #hint, "TenvResumeDim" })
+
+    if view == "folders" then
+      add(" ↑↓: 選ぶ   Enter・クリック: 開く   Esc: 閉じる", "TenvResumeDim")
+      frows = {}
+      for _, g in ipairs(fgroups) do
+        add("")
+        local gl = " " .. (g.remote and "󰒋 " or "󰍹 ") .. g.name
+        add(gl .. "  " .. (g.error or g.root or ""), "TenvResumeGroup")
+        table.insert(marks, { #lines - 1, #gl, #lines[#lines], "TenvResumeDim" })
+        if g.loading then add("    (読み込んでいます…)", "TenvResumeDim")
+        elseif #g.items == 0 and not g.error then add("    (ありません)", "TenvResumeDim") end
+        for _, it in ipairs(g.items) do
+          local t = it.t and when(it.t) or ""
+          local line = "    " .. fit(it.name, 34) .. "  " .. t
+          table.insert(lines, line)
+          it.lnum = #lines - 1
+          it.remote = g.remote
+          if t ~= "" then table.insert(marks, { it.lnum, #line - #t, #line, "TenvResumeDim" }) end
+          table.insert(frows, it)
+        end
+      end
+      paint(lines, marks)
+      fsel = math.max(1, math.min(fsel, #frows))
+      local cur = frows[fsel]
+      if cur then
+        vim.api.nvim_buf_set_extmark(buf, ns, cur.lnum, 0, { line_hl_group = "TenvResumeSel", priority = 50 })
+        pcall(vim.api.nvim_win_set_cursor, win, { cur.lnum + 1, 0 })
+      end
+      buttons = {}
+      return
+    end
+
     add(" Space・クリック: 選ぶ / 外す   Enter: 再開   Esc: 閉じる   "
       .. (startup and "チェック済みは前回開いていたもの" or "チェック済みは前回途中で閉じたもの"), "TenvResumeDim")
     rows = {}
+    if not loaded then
+      add("")
+      add("  前の作業を読み込んでいます…", "TenvResumeDim")
+      paint(lines, marks)
+      buttons = {}
+      return
+    end
     local name_w = 26
     local when_w = 12
     local state_w = 16
@@ -156,15 +255,7 @@ function M.run()
     }
     table.insert(marks, { blnum, buttons[1].s, buttons[1].e, "TenvResumeBtnMain" })
     table.insert(marks, { blnum, buttons[2].s, buttons[2].e, "TenvResumeBtn" })
-    lines_set(lines)
-    vim.api.nvim_buf_clear_namespace(buf, ns, 0, -1)
-    for _, m in ipairs(marks) do
-      if m[2] == -1 then
-        vim.api.nvim_buf_set_extmark(buf, ns, m[1], 0, { line_hl_group = m[4] })
-      else
-        vim.api.nvim_buf_set_extmark(buf, ns, m[1], m[2], { end_col = math.min(m[3], #lines[m[1] + 1]), hl_group = m[4] })
-      end
-    end
+    paint(lines, marks)
     local cur = rows[sel]
     if cur then
       vim.api.nvim_buf_set_extmark(buf, ns, cur.lnum, 0, { line_hl_group = "TenvResumeSel", priority = 50 })
@@ -173,6 +264,19 @@ function M.run()
   end
 
   local function close() vim.cmd("qa!") end
+
+  -- フォルダを開く: 会話の無い場所として WezTerm に渡す(WezTerm がいつもの並びのタブで開く)
+  local function open_folder(it)
+    if not it then return end
+    emit("tenv_resume", vim.json.encode({ token = token(), items = { { r = it.remote, cwd = it.path, ids = {} } } }))
+    vim.defer_fn(close, 300)
+  end
+
+  local function switch(to)
+    if not has_resume then return end
+    view = to or (view == "resume" and "folders" or "resume")
+    render()
+  end
 
   local function submit()
     local items = {}
@@ -200,16 +304,53 @@ function M.run()
   end
 
   local function finish_loading()
+    loaded = true
     local any = false
     for _, g in ipairs(groups) do
       for _, it in ipairs(g.items) do if it.checked then any = true end end
     end
-    -- 起動時は、前回開いていたものが無ければ何も出さない
-    if startup and not any then return close() end
+    -- 起動時: 前回開いていたものがあれば再開、無ければフォルダの一覧。どちらも出さないなら閉じる
+    if startup then
+      if any and req.startup_resume then view = "resume"
+      elseif req.startup_folders then view = "folders"
+      else return close() end
+    end
     sel = 1
     render()
     if startup then emit("tenv_resume_show", "1") end
   end
+
+  -- フォルダの一覧: リモート(登録した順)+ この PC。リモートは ssh で並行して集める
+  local function rebuild_folders()
+    fgroups = {}
+    for _, slot in ipairs(fslots) do
+      for _, g in ipairs(slot) do table.insert(fgroups, g) end
+    end
+    for _, f in ipairs(req.folders or {}) do
+      table.insert(fgroups, { name = "この PC", root = f.root, items = f.items or {} })
+    end
+  end
+  for _, r in ipairs(req.remotes or {}) do
+    if r.list then
+      local slot = #fslots + 1
+      fslots[slot] = { { name = r.name, remote = r.i, items = {}, loading = true } }
+      vim.system({ "ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=5", "--", r.host, r.list }, { text = true },
+        vim.schedule_wrap(function(res)
+          local list = res.code == 0 and parse_folders(res.stdout or "") or {}
+          if #list == 0 then
+            fslots[slot] = { { name = r.name, remote = r.i, items = {}, error = res.code == 0 and "(ありません)" or "(つながりません)" } }
+          else
+            fslots[slot] = {}
+            for _, g in ipairs(list) do
+              table.insert(fslots[slot], { name = r.name, remote = r.i, root = g.root, items = g.items })
+            end
+          end
+          rebuild_folders()
+          if view == "folders" and vim.api.nvim_buf_is_valid(buf) then render() end
+        end))
+    end
+  end
+  rebuild_folders()
 
   local function add_group(name, remote, sessions, err)
     local g = { name = name, remote = remote, items = {}, error = err }
@@ -224,7 +365,7 @@ function M.run()
 
   -- リモートは ssh で並行して集める(つながらないリモートは見出しに理由を出す)
   local remote_groups = {}
-  for _, r in ipairs(req.remotes or {}) do
+  for _, r in ipairs(has_resume and req.remotes or {}) do
     pending = pending + 1
     local script = 'p=$(command -v nvim || echo ~/.local/bin/nvim); exec "$p" --clean --headless -l '
       .. '"${XDG_CONFIG_HOME:-$HOME/.config}/nvim/lua/tenv/ccsessions.lua" ' .. days
@@ -248,28 +389,54 @@ function M.run()
         end
       end))
   end
-  M._local_group = add_group("この PC", nil, require("tenv.ccsessions").list(days))
+  M._local_group = add_group("この PC", nil, has_resume and require("tenv.ccsessions").list(days) or {})
   if pending == 0 then
-    groups = { M._local_group }
+    groups = has_resume and { M._local_group } or {}
     finish_loading()
+  elseif not startup then
+    render()
   end
 
   local function map(lhs, fn) vim.keymap.set("n", lhs, fn, { buffer = buf, nowait = true, silent = true }) end
   local function move(d)
-    if #rows == 0 then return end
-    sel = math.max(1, math.min(#rows, sel + d))
+    if view == "folders" then
+      if #frows == 0 then return end
+      fsel = math.max(1, math.min(#frows, fsel + d))
+    else
+      if #rows == 0 then return end
+      sel = math.max(1, math.min(#rows, sel + d))
+    end
     render()
   end
   for _, k in ipairs({ "j", "<Down>" }) do map(k, function() move(1) end) end
   for _, k in ipairs({ "k", "<Up>" }) do map(k, function() move(-1) end) end
-  map("<Space>", function() toggle(rows[sel]) end)
-  map("x", function() toggle(rows[sel]) end)
-  map("<CR>", submit)
+  map("<Space>", function() if view == "resume" then toggle(rows[sel]) end end)
+  map("x", function() if view == "resume" then toggle(rows[sel]) end end)
+  map("<CR>", function()
+    if view == "folders" then open_folder(frows[fsel]) elseif loaded then submit() end
+  end)
+  map("<Tab>", function() switch() end)
+  map("<S-Tab>", function() switch() end)
   map("<Esc>", close)
   map("q", close)
   map("<LeftMouse>", function()
     local p = vim.fn.getmousepos()
     if p.winid ~= win then return end
+    if p.line == 1 then
+      for _, h in ipairs(heads) do
+        if p.column - 1 >= h.s and p.column - 1 < h.e then return switch(h.view) end
+      end
+      return
+    end
+    if view == "folders" then
+      for i, it in ipairs(frows) do
+        if it.lnum == p.line - 1 then
+          fsel = i
+          return open_folder(it)
+        end
+      end
+      return
+    end
     for _, b in ipairs(buttons) do
       if p.line - 1 == b.lnum and p.column - 1 >= b.s and p.column - 1 < b.e then
         return b.action == "ok" and submit() or close()
@@ -283,7 +450,7 @@ function M.run()
     end
   end)
   for _, k in ipairs({ "<2-LeftMouse>", "<LeftRelease>", "<LeftDrag>", "<RightMouse>" }) do map(k, "<Nop>") end
-  vim.api.nvim_create_autocmd("VimResized", { buffer = buf, callback = function() if #groups > 0 then render() end end })
+  vim.api.nvim_create_autocmd("VimResized", { buffer = buf, callback = function() render() end })
 end
 
 return M
