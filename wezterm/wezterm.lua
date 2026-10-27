@@ -1104,6 +1104,11 @@ local function ask_claude(window, win_path)
       return wezterm.time.call_after(2, start)
     end
     f:close()
+    -- WezTerm は読めない作業フォルダを黙って捨てて別の場所で起動するので、先に確かめて止める
+    if not pcall(wezterm.read_dir, ASK.cwd) then
+      return say("作業フォルダ(ask_claude.cwd)が読めないので、Claude Code を起動しません: " .. ASK.cwd)
+    end
+    wezterm.log_info("ask_claude: cwd=" .. ASK.cwd .. " file=" .. win_path)
     local args = { exe }
     if ASK.remote_control then
       table.insert(args, "--remote-control")
