@@ -1455,20 +1455,20 @@ end
 ----------------------------------------------------------------
 -- 前の作業を再開(Claude Code)。画面は nvim(nvim/lua/tenv/resume.lua)が新しいタブで出す。
 -- 同じ画面にフォルダを開く一覧(Shift+Alt+O と同じ)もあり、Tab で切り替える
---   mode = "startup": 起動時。画面のタブは裏で開き、出すものがあるときだけ前に出る(tenv_resume_show)。
---                    前回開いていた作業があれば再開(claude_resume_on_startup)、無ければフォルダの一覧
---                    (open_on_startup)。どちらも無ければ何も出さずに閉じる
+--   mode = "startup": 起動時。窓をこの画面のタブ 1 つで始める(gui-startup)。前回開いていた作業があれば
+--                    再開(claude_resume_on_startup)、無ければフォルダの一覧(open_on_startup)から。
+--                    何も開かずに閉じたとき・出すものが無いときは、いつもの並びのタブを開かせる(tenv_resume_home)
 --   mode = "manual" : Shift+Alt+R・「＋」から
 -- 選んだ結果は、合言葉付きで tenv_resume として返ってくる: { items = { { r = リモートの番号 | nil, cwd, ids } } }
 -- (フォルダを開くときは ids が空)
 ----------------------------------------------------------------
-local function open_resume_picker(mux_win, mode)
+local RESUME_TITLE = S.claude_resume and "前の作業" or "フォルダを開く"
+local function resume_spawn(mode)
   local remotes = {}
   for i, r in ipairs(S.remotes) do
     table.insert(remotes, { i = i, name = r.name, host = r.host, list = remote_list_cmd(r) })
   end
-  local prev = mux_win:active_tab()
-  local tab = mux_win:spawn_tab({
+  return {
     cwd = wezterm.home_dir,
     args = { "nvim", "--cmd", "let g:tenv_not_tree = 1", "--cmd", "let g:tenv_resume = 1",
       "-c", "lua require('tenv.resume').run()" },
@@ -1480,17 +1480,33 @@ local function open_resume_picker(mux_win, mode)
         startup_folders = S.open_on_startup and true or false,
       }),
     },
-  })
-  tab:set_title(S.claude_resume and "前の作業" or "フォルダを開く")
-  if mode == "startup" and prev then pcall(function() prev:activate() end) end
+  }
+end
+
+local function open_resume_picker(mux_win, mode)
+  mux_win:spawn_tab(resume_spawn(mode)):set_title(RESUME_TITLE)
+end
+
+-- いつもの並びのタブ: 左にツリー、右にシェル。HOME_ROOT で開いたタブ(tab, pane)を並べる
+local HOME_ROOT = S.local_projects_root[1] or wezterm.home_dir
+local function setup_home_tab(tab, pane)
+  tab:set_title(folder_name(HOME_ROOT) or HOME_ROOT)
+  if S.tree_on_startup then
+    toggle_tree_local(nil, pane)
+    pane:activate()
+  end
 end
 
 wezterm.on("user-var-changed", function(window, pane, name, value)
-  if name ~= "tenv_resume" and name ~= "tenv_resume_show" then return end
+  if name ~= "tenv_resume" and name ~= "tenv_resume_show" and name ~= "tenv_resume_home" then return end
   -- 再開の画面はこの PC の nvim で動く。リモートの pane からの合図は受け付けない
   if is_remote_name(fg_name(pane)) then return end
   if name == "tenv_resume_show" then
     pcall(function() pane:tab():activate() end)
+    return
+  end
+  if name == "tenv_resume_home" then
+    setup_home_tab(window:mux_window():spawn_tab({ cwd = HOME_ROOT }))
     return
   end
   local ok, req = pcall(wezterm.json_parse, value)
@@ -1553,23 +1569,24 @@ local function fit_to_screen(mux_win)
   gui:set_position(s.x + math.floor((s.width - w) / 2), s.y + math.floor((s.height - h) / 2))
 end
 
--- 起動した最初の画面: 左にツリー、右にシェル(コマンドを指定して起動されたときは何もしない)
+-- 起動した最初の画面(コマンドを指定して起動されたときは何もしない)
+--   起動時の画面を出すなら、そのタブ 1 つで始める(閉じるといつもの並びのタブになる)。出さないなら、いつもの並び
 wezterm.on("gui-startup", function(cmd)
   if cmd and cmd.args then
     local _, _, w = wezterm.mux.spawn_window(cmd)
     fit_to_screen(w)
     return
   end
-  local root = S.local_projects_root[1] or wezterm.home_dir
-  local tab, pane, w = wezterm.mux.spawn_window({ cwd = root })
-  tab:set_title(folder_name(root) or root)
-  fit_to_screen(w)
-  if S.tree_on_startup then
-    toggle_tree_local(nil, pane)
-    pane:activate()
-  end
   -- 前回開いていた Claude Code の作業があれば再開の画面を、無ければフォルダを開く画面を出す(同じ画面。Tab で切り替え)
-  if (S.claude_resume and S.claude_resume_on_startup) or S.open_on_startup then open_resume_picker(w, "startup") end
+  if (S.claude_resume and S.claude_resume_on_startup) or S.open_on_startup then
+    local tab, _, w = wezterm.mux.spawn_window(resume_spawn("startup"))
+    tab:set_title(RESUME_TITLE)
+    fit_to_screen(w)
+    return
+  end
+  local tab, pane, w = wezterm.mux.spawn_window({ cwd = HOME_ROOT })
+  fit_to_screen(w)
+  setup_home_tab(tab, pane)
 end)
 
 local function cycle_theme()

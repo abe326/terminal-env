@@ -7,7 +7,8 @@
 --   ・同じ画面にフォルダを開く一覧(Shift+Alt+O と同じ)もあり、Tab で切り替える。選んだフォルダは
 --     tenv_resume で会話の無い(ids が空の)場所として渡す。WezTerm がいつもの並びで開く
 --   ・起動時(mode = startup)は、前回開いていたものがあれば再開(startup_resume)、無ければフォルダの一覧
---     (startup_folders)を出す。どちらも無ければ何も出さずに閉じる
+--     (startup_folders)を出す。起動時の窓はこのタブだけなので、何も開かずに閉じるとき(どちらも出さないときも)は、
+--     WezTerm にいつもの並びのタブを開かせてから閉じる(tenv_resume_home)
 --   TENV_RESUME(WezTerm が渡す JSON):
 --     { mode, days, resume, startup_resume, startup_folders,
 --       remotes = { { i, name, host, list } },   list = フォルダを一覧するコマンド(wezterm.lua の remote_list_cmd)
@@ -283,13 +284,22 @@ function M.run()
     end
   end
 
-  local function close() vim.cmd("qa!") end
+  local function quit() vim.cmd("qa!") end
+  -- 何も開かずに閉じる。起動時は窓がこのタブだけなので、先にいつもの並びのタブを開かせる
+  local closing = false
+  local function close()
+    if not startup then return quit() end
+    if closing then return end
+    closing = true
+    emit("tenv_resume_home", "1")
+    vim.defer_fn(quit, 300) -- 合図が WezTerm に届いてから閉じる
+  end
 
   -- フォルダを開く: 会話の無い場所として WezTerm に渡す(WezTerm がいつもの並びのタブで開く)
   local function open_folder(it)
     if not it then return end
     emit("tenv_resume", vim.json.encode({ token = token(), items = { { r = it.remote, cwd = it.path, ids = {} } } }))
-    vim.defer_fn(close, 300)
+    vim.defer_fn(quit, 300)
   end
 
   local function switch(to)
@@ -316,7 +326,7 @@ function M.run()
     end
     if #items == 0 then return close() end
     emit("tenv_resume", vim.json.encode({ token = token(), items = items }))
-    vim.defer_fn(close, 300) -- 合図が WezTerm に届いてから閉じる
+    vim.defer_fn(quit, 300) -- 合図が WezTerm に届いてから閉じる
   end
 
   local function toggle(it)
