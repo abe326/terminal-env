@@ -1071,12 +1071,12 @@ end
 ----------------------------------------------------------------
 local ASK = S.ask_claude
 if ASK then ASK.allowed = as_list(ASK.allowed) end
-local function ask_claude(window, win_path)
-  local function say(msg) window:toast_notification("WezTerm", msg, nil, 6000) end
+-- 頼みごとのファイルとして受け付けるか(--claude と --close で同じ判定)。受け付けるならファイル名、断るなら nil と理由
+local function ask_file(win_path, what)
   if not (ASK and ASK.cwd and #ASK.allowed > 0) then
-    return say("Claude Code を起動する合図は、設定(local.lua の ask_claude)で使えるようにしていません")
+    return nil, "Claude Code に頼む合図は、設定(local.lua の ask_claude)で使えるようにしていません"
   end
-  if not win_path then return say("この PC のどこにあるファイルか分かりません(remotes の path_map を確かめてください)") end
+  if not win_path then return nil, "この PC のどこにあるファイルか分かりません(remotes の path_map を確かめてください)" end
   local name = win_path:match("([^\\]+)$") or ""
   local dir = win_path:sub(1, #win_path - #name - 1):lower()
   local allowed = false
@@ -1084,10 +1084,16 @@ local function ask_claude(window, win_path)
     if dir == a:gsub("/", "\\"):gsub("\\+$", ""):lower() then allowed = true end
   end
   if not allowed or not name:lower():match("%.md$") then
-    return say("決まった場所の .md ではないので、Claude Code を起動しません: " .. name)
+    return nil, "決まった場所の .md ではないので、" .. what .. ": " .. name
   end
   -- 名前は claude の引数(最初の指示)に入る。Windows で別の意味になりうる記号を含む名前は断る
-  if win_path:find('[%c"%%^&!`<>|]') then return say("記号を含む名前なので、Claude Code を起動しません: " .. name) end
+  if win_path:find('[%c"%%^&!`<>|]') then return nil, "記号を含む名前なので、" .. what .. ": " .. name end
+  return name
+end
+local function ask_claude(window, win_path)
+  local function say(msg) window:toast_notification("WezTerm", msg, nil, 6000) end
+  local name, why = ask_file(win_path, "Claude Code を起動しません")
+  if not name then return say(why) end
   local exe = ASK.command or "claude.exe"
   if not exe:lower():match("%.exe$") then return say("ask_claude.command は .exe を指定してください") end
   local interval = ASK.interval or 30
@@ -1120,10 +1126,34 @@ local function ask_claude(window, win_path)
     table.insert(argv, "次のファイルを読んで、書かれている依頼を進めてください: " .. win_path)
     local ok, out, err = wezterm.run_child_process(argv)
     if not ok then return say("Claude Code のタブを開けませんでした: " .. tostring(err)) end
-    local p = wezterm.mux.get_pane(tonumber((out or ""):match("%d+")) or -1)
+    local id = tonumber((out or ""):match("%d+"))
+    local p = id and wezterm.mux.get_pane(id)
     if p then p:tab():set_title("依頼: " .. name) end
+    -- wopen --close で閉じられるように、ファイルと pane を覚える(WezTerm を終えると忘れる)
+    if id then
+      local panes = wezterm.GLOBAL.tenv_ask_panes or {}
+      panes[win_path:lower()] = id
+      wezterm.GLOBAL.tenv_ask_panes = panes
+    end
   end
   start()
+end
+
+-- wopen --close <ファイル>: そのファイルを渡して開いた pane だけを閉じる。覚えていないもの・もう無いものは閉じずに知らせる
+local function ask_close(window, win_path)
+  local function say(msg) window:toast_notification("WezTerm", msg, nil, 6000) end
+  local name, why = ask_file(win_path, "閉じません")
+  if not name then return say(why) end
+  local panes = wezterm.GLOBAL.tenv_ask_panes or {}
+  local id = panes[win_path:lower()]
+  if not id then return say("このファイルで開いたタブを覚えていないので、閉じません: " .. name) end
+  panes[win_path:lower()] = nil
+  wezterm.GLOBAL.tenv_ask_panes = panes
+  if not wezterm.mux.get_pane(id) then return say("このファイルで開いたタブは、もうありません: " .. name) end
+  local ok, _, err = wezterm.run_child_process({ wezterm.executable_dir .. "\\wezterm.exe", "cli", "kill-pane", "--pane-id", tostring(id) })
+  if not ok then return say("タブを閉じられませんでした: " .. tostring(err)) end
+  -- 閉じたことは知らせない(デバッグ表示 Ctrl+Shift+L にだけ出す)
+  wezterm.log_info("ask_claude: closed pane " .. id .. " file=" .. win_path)
 end
 
 wezterm.on("user-var-changed", function(window, pane, name, value)
@@ -1140,7 +1170,7 @@ wezterm.on("user-var-changed", function(window, pane, name, value)
   if path:find("%.%.") then return end
   -- Windows で開く・表示するときだけ、Windows で別の意味になる文字を確かめる。
   -- 編集・Git はリモートの中だけで動くので、制御文字だけを確かめる(配置は「配置先 改行 Windows のパス...」の形)
-  if kind == "open" or kind == "reveal" or kind == "claude" then
+  if kind == "open" or kind == "reveal" or kind == "claude" or kind == "close" then
     if not safe_remote_path(path) then
       window:toast_notification("WezTerm", "Windows では扱えない文字を含む名前です(: \" < > | ? * \\ や、末尾の . と空白)。"
         .. "ツリーのダブルクリック(エディタ)なら開けます", nil, 6000)
@@ -1245,6 +1275,8 @@ wezterm.on("user-var-changed", function(window, pane, name, value)
     open_checked(window, pane, path, do_open)
   elseif kind == "claude" then
     ask_claude(window, win_path)
+  elseif kind == "close" then
+    ask_close(window, win_path)
   elseif kind == "reveal" and win_path then
     if win_path:find(",", 1, true) then
       -- explorer.exe は , を区切りとして読むので、, を含むパスは場所(親のフォルダ)を開くだけにする
