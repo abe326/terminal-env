@@ -7,6 +7,7 @@
 #   wopen --keys                  新しいタブで操作一覧を開く
 #   wopen --settings              新しいタブで設定(local.lua)を開く
 #   wopen --upload <dir> <Windows のパス>...   Windows のファイルを <dir> に配置する(WezTerm 側で確認が出る)
+#   wopen --claude <file>         Windows の新しいタブで Claude Code を起動し、<file> を読ませる(WezTerm の ask_claude)
 #
 # 端末(手元の WezTerm)へ OSC 1337 SetUserVar=wez_open を送り、WezTerm の設定(wezterm.lua の user-var-changed)が受ける。
 # 新しいポートや Windows 側の sshd は要らない。
@@ -35,7 +36,7 @@ token() {
 
 send() { emit "$1|$2|$(date +%s%N)|$(token)"; }
 
-usage() { sed -n '2,9p' "$0" | sed 's/^# //' >&2; exit 2; }
+usage() { sed -n '2,10p' "$0" | sed 's/^# //' >&2; exit 2; }
 
 case "${1:-}" in
   ""|-h|--help) usage ;;
@@ -43,6 +44,7 @@ case "${1:-}" in
   --keys) send keys / ;;
   --edit) [ $# -eq 2 ] || usage; send edit "$(realpath -- "$2")" ;;
   --git) [ $# -eq 2 ] || usage; send git "$(realpath -- "$2")" ;;
+  --claude) [ $# -eq 2 ] && [ -f "$2" ] || usage; send claude "$(realpath -- "$2")" ;;
   --upload)
     [ $# -ge 3 ] || usage
     dest=$(realpath -- "$2"); shift 2

@@ -44,6 +44,9 @@ local S = {
 
   -- リモート(ssh でつなぐ Linux 機)。使わないなら空のまま。項目は local.example.lua を参照
   remotes = {},
+  -- リモートから頼まれて、この PC の新しいタブで Claude Code を起動する(wopen --claude <ファイル>)。使わないなら nil。
+  -- 項目は local.example.lua を参照
+  ask_claude = nil,
 
   -- 見た目
   -- 起動した最初の窓の大きさ(画面に対する割合。中央に置く)。nil なら WezTerm の既定
@@ -1059,6 +1062,59 @@ local function open_allowed(rem, p)
   return false
 end
 
+----------------------------------------------------------------
+-- リモートから頼まれて、この PC の新しいタブで Claude Code を起動する(wopen --claude <ファイル>)
+--   ・起動するのは Claude Code(.exe)だけ。権限のモードは付けない(この PC の Claude Code の設定のまま。既定は毎回確認)
+--   ・起動する場所は設定で固定(ask_claude.cwd)。渡すのはファイルの場所だけで、中身はコマンド行に入れない
+--   ・渡せるのは ask_claude.allowed の直下の .md だけ。続けて来た合図(interval 秒以内)は捨てる
+--   ・ファイルは同期で後から届くことがあるので、見つからなければ少し待つ
+----------------------------------------------------------------
+local ASK = S.ask_claude
+if ASK then ASK.allowed = as_list(ASK.allowed) end
+local function ask_claude(window, win_path)
+  local function say(msg) window:toast_notification("WezTerm", msg, nil, 6000) end
+  if not (ASK and ASK.cwd and #ASK.allowed > 0) then
+    return say("Claude Code を起動する合図は、設定(local.lua の ask_claude)で使えるようにしていません")
+  end
+  if not win_path then return say("この PC のどこにあるファイルか分かりません(remotes の path_map を確かめてください)") end
+  local name = win_path:match("([^\\]+)$") or ""
+  local dir = win_path:sub(1, #win_path - #name - 1):lower()
+  local allowed = false
+  for _, a in ipairs(ASK.allowed) do
+    if dir == a:gsub("/", "\\"):gsub("\\+$", ""):lower() then allowed = true end
+  end
+  if not allowed or not name:lower():match("%.md$") then
+    return say("決まった場所の .md ではないので、Claude Code を起動しません: " .. name)
+  end
+  -- 名前は claude の引数(最初の指示)に入る。Windows で別の意味になりうる記号を含む名前は断る
+  if win_path:find('[%c"%%^&!`<>|]') then return say("記号を含む名前なので、Claude Code を起動しません: " .. name) end
+  local exe = ASK.command or "claude.exe"
+  if not exe:lower():match("%.exe$") then return say("ask_claude.command は .exe を指定してください") end
+  local interval = ASK.interval or 30
+  if os.time() - (wezterm.GLOBAL.tenv_ask_at or 0) < interval then
+    return say("続けて来た合図なので無視しました(" .. interval .. " 秒あけてください): " .. name)
+  end
+  wezterm.GLOBAL.tenv_ask_at = os.time()
+  local tries = 0
+  local function start()
+    local f = io.open(win_path, "r")
+    if not f then
+      tries = tries + 1
+      if tries > 5 then return say("ファイルがこの PC に見つからないので、Claude Code を起動しません: " .. name) end
+      return wezterm.time.call_after(2, start)
+    end
+    f:close()
+    local args = { exe }
+    if ASK.remote_control then
+      table.insert(args, "--remote-control")
+      table.insert(args, ASK.remote_control)
+    end
+    table.insert(args, "次のファイルを読んで、書かれている依頼を進めてください: " .. win_path)
+    window:mux_window():spawn_tab({ cwd = ASK.cwd, args = args }):set_title("依頼: " .. name)
+  end
+  start()
+end
+
 wezterm.on("user-var-changed", function(window, pane, name, value)
   if name ~= "wez_open" then return end
   -- 合言葉が合わない合図は捨てる(端末に流れただけの文字列からは来ない)。知らせるのは 1 分に 1 回まで
@@ -1073,7 +1129,7 @@ wezterm.on("user-var-changed", function(window, pane, name, value)
   if path:find("%.%.") then return end
   -- Windows で開く・表示するときだけ、Windows で別の意味になる文字を確かめる。
   -- 編集・Git はリモートの中だけで動くので、制御文字だけを確かめる(配置は「配置先 改行 Windows のパス...」の形)
-  if kind == "open" or kind == "reveal" then
+  if kind == "open" or kind == "reveal" or kind == "claude" then
     if not safe_remote_path(path) then
       window:toast_notification("WezTerm", "Windows では扱えない文字を含む名前です(: \" < > | ? * \\ や、末尾の . と空白)。"
         .. "ツリーのダブルクリック(エディタ)なら開けます", nil, 6000)
@@ -1176,6 +1232,8 @@ wezterm.on("user-var-changed", function(window, pane, name, value)
       end
     end
     open_checked(window, pane, path, do_open)
+  elseif kind == "claude" then
+    ask_claude(window, win_path)
   elseif kind == "reveal" and win_path then
     if win_path:find(",", 1, true) then
       -- explorer.exe は , を区切りとして読むので、, を含むパスは場所(親のフォルダ)を開くだけにする

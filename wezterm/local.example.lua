@@ -116,4 +116,19 @@ return {
     -- { name = "gpu", host = "gpu-box", projects_root = "~/src" },
   },
   --]=]
+
+  ----------------------------------------------------------------
+  -- リモートから頼まれて、この PC の新しいタブで Claude Code を起動する(リモートで wopen --claude <ファイル>)。使う場合だけ
+  --   ・渡せるのは allowed の直下の .md だけ(リモートのパスは、そのリモートの path_map で直す)。最初の指示は
+  --     「次のファイルを読んで、書かれている依頼を進めてください: <この PC のパス>」
+  --   ・起動するのは Claude Code だけで、権限のモードは付けない(この PC の Claude Code の設定のまま)
+  --   ・安全の条件は README の「安全のために」
+  ----------------------------------------------------------------
+  -- ask_claude = {
+  --   cwd = [[C:\work\inbox]],           -- 起動する場所(固定)
+  --   allowed = [[C:\work\inbox\requests]], -- 渡せるファイルの場所(この直下の .md だけ)。複数なら { ..., ... }
+  --   remote_control = "win-inbox",     -- claude --remote-control に付ける名前(省略可)
+  --   interval = 30,                    -- これより短い間に続いた合図は無視する(秒。省略時 30)
+  --   command = "claude.exe",           -- 起動するもの(.exe だけ。省略時 claude.exe)
+  -- },
 }
