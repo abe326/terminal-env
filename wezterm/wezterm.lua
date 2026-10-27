@@ -1090,6 +1090,20 @@ local function ask_file(win_path, what)
   if win_path:find('[%c"%%^&!`<>|]') then return nil, "記号を含む名前なので、" .. what .. ": " .. name end
   return name
 end
+-- 一覧で見分けるための短い名前。「YYYY-MM-DD-<番号>-<件名>.md」なら日付を除き、件名は長ければ切り詰める
+local ASK_LABEL_CHARS = 24
+local function ask_label(name)
+  local stem = name:gsub("%.[mM][dD]$", "")
+  local num, subject = stem:match("^%d%d%d%d%-%d%d%-%d%d%-([^-]+)-(.+)$")
+  local label = num and (num .. " ") or ""
+  subject = subject or stem
+  local chars = {}
+  for ch in subject:gmatch("[^\128-\191][\128-\191]*") do table.insert(chars, ch) end
+  if #chars > ASK_LABEL_CHARS then
+    subject = table.concat(chars, "", 1, ASK_LABEL_CHARS - 1) .. "…"
+  end
+  return label .. subject
+end
 local function ask_claude(window, win_path)
   local function say(msg) window:toast_notification("WezTerm", msg, nil, 6000) end
   local name, why = ask_file(win_path, "Claude Code を起動しません")
@@ -1119,16 +1133,18 @@ local function ask_claude(window, win_path)
     -- wezterm cli spawn なら cwd が効く。シェルは通さない
     local argv = { wezterm.executable_dir .. "\\wezterm.exe", "cli", "spawn",
       "--window-id", tostring(window:window_id()), "--cwd", ASK.cwd, "--", exe }
+    -- remote_control は名前の頭。後ろに依頼の短い名前を付け、スマホなどの一覧で見分けられるようにする
+    local label = ask_label(name)
     if ASK.remote_control then
       table.insert(argv, "--remote-control")
-      table.insert(argv, ASK.remote_control)
+      table.insert(argv, ASK.remote_control .. " " .. label)
     end
     table.insert(argv, "次のファイルを読んで、書かれている依頼を進めてください: " .. win_path)
     local ok, out, err = wezterm.run_child_process(argv)
     if not ok then return say("Claude Code のタブを開けませんでした: " .. tostring(err)) end
     local id = tonumber((out or ""):match("%d+"))
     local p = id and wezterm.mux.get_pane(id)
-    if p then p:tab():set_title("依頼: " .. name) end
+    if p then p:tab():set_title("依頼 " .. label) end
     -- wopen --close で閉じられるように、ファイルと pane を覚える(WezTerm を終えると忘れる)
     if id then
       local panes = wezterm.GLOBAL.tenv_ask_panes or {}

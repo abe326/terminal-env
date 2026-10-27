@@ -127,7 +127,8 @@ return {
   -- ask_claude = {
   --   cwd = [[C:\work\inbox]],           -- 起動する場所(固定)
   --   allowed = [[C:\work\inbox\requests]], -- 渡せるファイルの場所(この直下の .md だけ)。複数なら { ..., ... }
-  --   remote_control = "win-inbox",     -- claude --remote-control に付ける名前(省略可)
+  --   remote_control = "win-inbox",     -- claude --remote-control に付ける名前の頭(省略可)。後ろに依頼の短い名前が付く
+  --                                     -- (ファイル名が 2026-01-02-14-件名.md なら「win-inbox 14 件名」。件名は長ければ切り詰める)
   --   interval = 30,                    -- これより短い間に続いた合図は無視する(秒。省略時 30)
   --   command = "claude.exe",           -- 起動するもの(.exe だけ。省略時 claude.exe)
   -- },
