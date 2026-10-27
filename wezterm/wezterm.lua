@@ -1109,13 +1109,19 @@ local function ask_claude(window, win_path)
       return say("作業フォルダ(ask_claude.cwd)が読めないので、Claude Code を起動しません: " .. ASK.cwd)
     end
     wezterm.log_info("ask_claude: cwd=" .. ASK.cwd .. " file=" .. win_path)
-    local args = { exe }
+    -- spawn_tab は args と cwd を一緒に渡すと cwd を捨て、前に出ている pane の場所で開く(20240203 時点)。
+    -- wezterm cli spawn なら cwd が効く。シェルは通さない
+    local argv = { wezterm.executable_dir .. "\\wezterm.exe", "cli", "spawn",
+      "--window-id", tostring(window:window_id()), "--cwd", ASK.cwd, "--", exe }
     if ASK.remote_control then
-      table.insert(args, "--remote-control")
-      table.insert(args, ASK.remote_control)
+      table.insert(argv, "--remote-control")
+      table.insert(argv, ASK.remote_control)
     end
-    table.insert(args, "次のファイルを読んで、書かれている依頼を進めてください: " .. win_path)
-    window:mux_window():spawn_tab({ cwd = ASK.cwd, args = args }):set_title("依頼: " .. name)
+    table.insert(argv, "次のファイルを読んで、書かれている依頼を進めてください: " .. win_path)
+    local ok, out, err = wezterm.run_child_process(argv)
+    if not ok then return say("Claude Code のタブを開けませんでした: " .. tostring(err)) end
+    local p = wezterm.mux.get_pane(tonumber((out or ""):match("%d+")) or -1)
+    if p then p:tab():set_title("依頼: " .. name) end
   end
   start()
 end
