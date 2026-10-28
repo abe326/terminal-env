@@ -793,35 +793,260 @@ wezterm.on("update-status", function(window, pane)
 end)
 
 ----------------------------------------------------------------
--- ツリーの幅を保つ(tree_width_fixed)。WezTerm は窓の大きさに合わせて pane を伸び縮みさせるので、戻す。
---   窓の大きさが変わっていないのに幅が変わった = 境目をドラッグした → その幅を覚える
+-- pane の並びを「縦か横の 1 本の線で 2 つに分ける」木として扱う(ツリーの幅と右側の並びを保つ処理と、ツリーの開き直しで使う)
 ----------------------------------------------------------------
-wezterm.GLOBAL.tree_panes = wezterm.GLOBAL.tree_panes or {}
-wezterm.GLOBAL.tree_w = wezterm.GLOBAL.tree_w or {} -- タブ → 保つ幅
-local TAB_COLS = {} -- タブ → 前に見たときのタブの幅
-local function fit_trees(gw, resized)
-  if not S.tree_width_fixed then return end
-  for _, t in ipairs(gw:mux_window():tabs()) do
-    local key = tostring(t:tab_id())
-    local tree_id = wezterm.GLOBAL.tree_panes[key]
-    for _, info in ipairs(tree_id and t:panes_with_info() or {}) do
-      if info.pane:pane_id() == tree_id and not info.is_zoomed then
-        local cols = t:get_size().cols
-        local want = wezterm.GLOBAL.tree_w[key] or S.tree_width
-        if not resized and TAB_COLS[key] == cols then
-          wezterm.GLOBAL.tree_w[key] = info.width
-        elseif info.width ~= want then
-          gw:perform_action(act.AdjustPaneSize({ info.width > want and "Left" or "Right", math.abs(info.width - want) }), info.pane)
+-- pane の並び(rects = { { id, left, top, width, height }, ... }。領域 (x, y, w, h) の中の位置)から分割の木を作る。
+-- WezTerm の並びは、縦か横の 1 本の線で必ず 2 つに分けられる。節 = { dir = "h" | "v", w, h, first, second }、葉 = { id, w, h }
+local function layout_tree(rects, x, y, w, h)
+  if #rects == 1 then return { id = rects[1].id, w = w, h = h } end
+  for _, axis in ipairs({ { "left", "width", "h" }, { "top", "height", "v" } }) do
+    local pos, len, dir = axis[1], axis[2], axis[3]
+    for _, r in ipairs(rects) do
+      local c = r[pos] -- この pane の手前(c - 1)の 1 本が、全部の pane を 2 つに分けるか
+      if c > (dir == "h" and x or y) then
+        local a, b, ok = {}, {}, true
+        for _, q in ipairs(rects) do
+          if q[pos] + q[len] < c then table.insert(a, q)
+          elseif q[pos] >= c then table.insert(b, q)
+          else ok = false break end
         end
-        TAB_COLS[key] = cols
+        if ok and #a > 0 and #b > 0 then
+          local first, second
+          if dir == "h" then
+            first, second = layout_tree(a, x, y, c - 1 - x, h), layout_tree(b, c, y, x + w - c, h)
+          else
+            first, second = layout_tree(a, x, y, w, c - 1 - y), layout_tree(b, x, c, w, y + h - c)
+          end
+          if first and second then return { dir = dir, w = w, h = h, first = first, second = second } end
+        end
       end
     end
   end
+  return nil -- 分けられない(想定外の並び)
+end
+
+-- 木の各節に、戻す先の大きさ(tw, th)を割り付ける。元(w, h)と違う大きさなら元の比で配る
+local function fit_layout(node, tw, th)
+  node.tw, node.th = tw, th
+  if node.id then return end
+  if node.dir == "h" then
+    local fw = node.first.w
+    if tw ~= node.w then fw = math.max(1, math.min(tw - 2, math.floor(fw * tw / node.w + 0.5))) end
+    fit_layout(node.first, fw, th)
+    fit_layout(node.second, tw - fw - 1, th)
+  else
+    local fh = node.first.h
+    if th ~= node.h then fh = math.max(1, math.min(th - 2, math.floor(fh * th / node.h + 0.5))) end
+    fit_layout(node.first, tw, fh)
+    fit_layout(node.second, tw, th - fh - 1)
+  end
+end
+
+-- 木の各葉の位置(節の左上が (x, y))を out[id] = { left, top, width, height } に書く(fit_layout のあと)
+local function layout_rects(node, x, y, out)
+  if node.id then out[node.id] = { left = x, top = y, width = node.tw, height = node.th } return end
+  layout_rects(node.first, x, y, out)
+  if node.dir == "h" then layout_rects(node.second, x + node.first.tw + 1, y, out)
+  else layout_rects(node.second, x, y + node.first.th + 1, out) end
+end
+
+----------------------------------------------------------------
+-- ツリーの幅と右側の並びを保つ(tree_width_fixed)
+--   WezTerm は窓の大きさが変わると、分割の線ごとに左右(上下)へ 1 桁ずつ交互に配る(mux/src/tab.rs の adjust_x_size。
+--   入れ子の分割では先頭の側に寄る)ので、ツリーの幅も右側の pane の幅の比も変わる。そこで、落ち着いているときの
+--   並び(基準)を覚えておき、タブの大きさが変わったら、ツリーは覚えた幅のまま・右側は基準の比で、分割の線を 1 本ずつ
+--   動かして戻す。基準は元の大きさのまま持ち、戻すたびに基準から計算し直すので、何度伸び縮みさせてもずれが積もらない。
+--   大きさが変わっていないのに並びが変わった = 境目をドラッグした・pane を割った・閉じた → それを新しい基準にする
+--   (ツリーの幅を手でずらしたときは、その幅を保つ)。
+--   線を動かす AdjustPaneSize は、WezTerm 20240203 では「前に出ているタブの、選ばれた pane」にしか効かず(渡した pane は
+--   見ない。wezterm-gui/src/termwindow/mod.rs。wezterm cli adjust-pane-size --pane-id も、その pane のタブの選ばれた pane に
+--   効く)、動くのは「選ばれた pane からいちばん近い、同じ向きの分割の線」1 本。そこで、前に出ているタブだけを直し、
+--   線ごとに、その線に接する pane をいったん選んで動かし、終わったら元の pane を選び直す。動かしたあとに狙った線が
+--   動いたかを見て、反対側の線が動いていたら戻して別の pane で試す(pane の位置だけでは、どの線がどの pane に近いかが
+--   決まらない形があるため)。前に出ていないタブは、前に出たとき(update-status と 1 秒ごとの見回り)に直す
+----------------------------------------------------------------
+wezterm.GLOBAL.tree_panes = wezterm.GLOBAL.tree_panes or {}
+wezterm.GLOBAL.tree_w = wezterm.GLOBAL.tree_w or {} -- タブ → 保つツリーの幅
+wezterm.GLOBAL.tree_base = wezterm.GLOBAL.tree_base or {} -- タブ → 基準の並び(JSON: cols, rows, rects)
+local FIT_SEEN = {} -- タブ → 前に見たときの大きさ(前に出ていないタブも)
+local FIT_DIRTY = {} -- タブ → 大きさが変わってから戻していない
+local FIT_LAST = {} -- タブ → 前に見た(戻した)並び。これと違えば手で変えた
+local FIT_TRIES = {} -- タブ → 戻せなかった回数(3 回で諦めて、次に大きさが変わるまで触らない)
+local fit_busy, fit_pending = false, nil
+
+-- タブの pane の並び(id 順)と、拡大中の pane があるか
+local function tab_rects(tab)
+  local rects, zoomed = {}, false
+  for _, info in ipairs(tab:panes_with_info()) do
+    if info.is_zoomed then zoomed = true end
+    table.insert(rects, { id = info.pane:pane_id(), left = info.left, top = info.top, width = info.width, height = info.height, pane = info.pane })
+  end
+  table.sort(rects, function(a, b) return a.id < b.id end)
+  return rects, zoomed
+end
+
+local function rects_sig(rects)
+  local parts = {}
+  for _, r in ipairs(rects) do parts[#parts + 1] = string.format("%d:%d,%d,%d,%d", r.id, r.left, r.top, r.width, r.height) end
+  return table.concat(parts, ";")
+end
+
+local function set_base(key, size, rects)
+  local plain = {}
+  for _, r in ipairs(rects) do table.insert(plain, { id = r.id, left = r.left, top = r.top, width = r.width, height = r.height }) end
+  wezterm.GLOBAL.tree_base[key] = wezterm.json_encode({ cols = size.cols, rows = size.rows, rects = plain })
+end
+
+-- 基準の並びを、今のタブの大きさに合わせた狙いの並び(id → { left, top, width, height })にする。
+-- ツリーは want_w の幅で左端の全高、右側は基準の比。右側の並びが木にならないときはツリーだけ。基準のツリーが左端の全高でなければ nil
+local function fit_target(base, size, tree_id, want_w)
+  local tree, right = nil, {}
+  for _, r in ipairs(base.rects) do
+    if r.id == tree_id then tree = r else table.insert(right, r) end
+  end
+  if not tree or tree.left ~= 0 or tree.top ~= 0 or tree.height ~= base.rows then return nil end
+  local target = { [tree_id] = { left = 0, top = 0, width = want_w, height = size.rows } }
+  local rw = size.cols - want_w - 1
+  if #right == 0 or rw < 2 then return target end
+  local x0, rel = tree.width + 1, {}
+  for _, r in ipairs(right) do table.insert(rel, { id = r.id, left = r.left - x0, top = r.top, width = r.width, height = r.height }) end
+  local node = layout_tree(rel, 0, 0, base.cols - x0, base.rows)
+  if not node then return target end
+  fit_layout(node, rw, size.rows)
+  layout_rects(node, want_w + 1, 0, target)
+  return target
+end
+
+local function edge_pos(r, e)
+  if e == "right" then return r.left + r.width elseif e == "left" then return r.left
+  elseif e == "bottom" then return r.top + r.height else return r.top end
+end
+local OPPOSITE = { right = "left", left = "right", bottom = "top", top = "bottom" }
+
+-- 前に出ているタブの並びを target に寄せる。線を 1 本ずつ、その線に接する pane を選んで AdjustPaneSize で動かす。全部そろえば true
+local function fit_apply(gw, tab, target, size)
+  local orig = tab:active_pane()
+  local failed, done, n = {}, false, 0
+  for _ in pairs(target) do n = n + 1 end
+  for _ = 1, 6 * n + 2 do
+    local cands = {}
+    for _, r in ipairs(tab_rects(tab)) do
+      local tg = target[r.id]
+      if tg then
+        for _, c in ipairs({
+          { e = "right", inner = r.left + r.width < size.cols, sure = r.left == 0, len = r.height, h = true },
+          { e = "left", inner = r.left > 0, sure = r.left + r.width == size.cols, len = r.height, h = true },
+          { e = "bottom", inner = r.top + r.height < size.rows, sure = r.top == 0, len = r.width, h = false },
+          { e = "top", inner = r.top > 0, sure = r.top + r.height == size.rows, len = r.width, h = false },
+        }) do
+          c.r, c.cur, c.want = r, edge_pos(r, c.e), edge_pos(tg, c.e)
+          if c.inner and c.cur ~= c.want and not failed[r.id .. c.e] then table.insert(cands, c) end
+        end
+      end
+    end
+    if #cands == 0 then done = true break end
+    -- 確かに動かせる pane(反対側が窓の端)を先に、次に線の長い(上位の分割らしい)ものを
+    table.sort(cands, function(a, b)
+      if a.sure ~= b.sure then return a.sure end
+      if a.len ~= b.len then return a.len > b.len end
+      if a.r.id ~= b.r.id then return a.r.id < b.r.id end
+      return a.e < b.e
+    end)
+    local c = cands[1]
+    local d = c.want - c.cur
+    if tab:active_pane():pane_id() ~= c.r.id then c.r.pane:activate() end
+    gw:perform_action(act.AdjustPaneSize({ c.h and (d > 0 and "Right" or "Left") or (d > 0 and "Down" or "Up"), math.abs(d) }), c.r.pane)
+    local after
+    for _, r in ipairs(tab_rects(tab)) do if r.id == c.r.id then after = r end end
+    local now = after and edge_pos(after, c.e)
+    if now == c.cur then
+      -- 狙った線が動かなかった。反対側の線が動いていたら(いちばん近い分割がそちらだった)戻す。この pane のこの辺では試さない
+      local shift = after and (edge_pos(after, OPPOSITE[c.e]) - edge_pos(c.r, OPPOSITE[c.e])) or 0
+      if shift ~= 0 then
+        gw:perform_action(act.AdjustPaneSize({ c.h and (shift > 0 and "Left" or "Right") or (shift > 0 and "Up" or "Down"), math.abs(shift) }), c.r.pane)
+      end
+      failed[c.r.id .. c.e] = true
+    elseif now ~= c.want then
+      failed[c.r.id .. c.e] = true -- 途中までしか動かない(ほかの pane が最小の大きさ)
+    end
+  end
+  if orig and tab:active_pane():pane_id() ~= orig:pane_id() then orig:activate() end
+  return done
+end
+
+-- 前に出ているタブ 1 つ分: 基準を覚える・手で変えた並びを新しい基準にする・大きさが変わっていたら戻す
+local function fit_tab(gw, tab, key, tree_id, size)
+  local rects, zoomed = tab_rects(tab)
+  if zoomed then return end
+  local tree
+  for _, r in ipairs(rects) do if r.id == tree_id then tree = r end end
+  if not tree then return end
+  local sig = rects_sig(rects)
+  local ok, base = pcall(wezterm.json_parse, wezterm.GLOBAL.tree_base[key] or "")
+  if not (ok and type(base) == "table" and type(base.rects) == "table") then base = nil end
+  local same = base ~= nil and #base.rects == #rects
+  if same then
+    local ids = {}
+    for _, r in ipairs(base.rects) do ids[r.id] = true end
+    for _, r in ipairs(rects) do if not ids[r.id] then same = false end end
+  end
+  if not same or not FIT_DIRTY[key] then
+    if not same or FIT_LAST[key] ~= sig then
+      -- pane の組が変わった(割った・閉じた・ツリーを開き直した)か、大きさは同じまま並びが変わった(境目をドラッグした)
+      -- → 今の並びを基準にする。ツリーも今の幅を保つ
+      set_base(key, size, rects)
+      wezterm.GLOBAL.tree_w[key] = tree.width
+      FIT_LAST[key], FIT_DIRTY[key], FIT_TRIES[key] = sig, nil, nil
+    end
+    return
+  end
+  -- 大きさが変わった → 基準から戻す
+  local target = fit_target(base, size, tree_id, wezterm.GLOBAL.tree_w[key] or S.tree_width)
+  local done = target == nil or fit_apply(gw, tab, target, size)
+  FIT_LAST[key] = rects_sig(tab_rects(tab))
+  if done then
+    FIT_DIRTY[key], FIT_TRIES[key] = nil, nil
+  else
+    FIT_TRIES[key] = (FIT_TRIES[key] or 0) + 1
+    if FIT_TRIES[key] >= 3 then FIT_DIRTY[key], FIT_TRIES[key] = nil, nil end
+  end
+end
+
+local function fit_trees_impl(gw, resized)
+  local active = gw:active_tab()
+  local active_id = active and active:tab_id()
+  for _, t in ipairs(gw:mux_window():tabs()) do
+    local key = tostring(t:tab_id())
+    local tree_id = wezterm.GLOBAL.tree_panes[key]
+    if tree_id then
+      local size = t:get_size()
+      local seen = FIT_SEEN[key]
+      if resized or (seen and (seen.cols ~= size.cols or seen.rows ~= size.rows)) then FIT_DIRTY[key] = true end
+      FIT_SEEN[key] = { cols = size.cols, rows = size.rows }
+      if t:tab_id() == active_id then fit_tab(gw, t, key, tree_id, size) end
+    end
+  end
+end
+
+-- resized: window-resized から(窓の全タブの大きさが変わった)。動いている途中に呼ばれたら、終わってからもう 1 回
+local function fit_trees(gw, resized)
+  if not S.tree_width_fixed then return end
+  if fit_busy then fit_pending = { resized = resized or (fit_pending and fit_pending.resized) or false } return end
+  fit_busy = true
+  fit_pending = { resized = resized }
+  while fit_pending do
+    local p = fit_pending
+    fit_pending = nil
+    local ok, err = pcall(fit_trees_impl, gw, p.resized)
+    if not ok then wezterm.log_error("fit_trees: " .. tostring(err)) end
+  end
+  fit_busy = false
 end
 wezterm.on("window-resized", function(window, pane)
   fit_trees(window, true)
   render_status(window, pane) -- タブの幅を割り振り直す
 end)
+wezterm.on("update-status", function(window) pcall(fit_trees, window, false) end) -- タブを切り替えたときに、そのタブを直す
 
 -- update-status は窓が前に無いとほとんど呼ばれない。別のアプリを使っている間も通知とタブの表示を更新するため、
 -- 1 秒ごとに自分で回す。
@@ -1342,53 +1567,6 @@ local function wezterm_cli(args)
   local ok, _, err = wezterm.run_child_process(argv)
   if not ok then wezterm.log_error("wezterm cli " .. table.concat(args, " ") .. ": " .. tostring(err)) end
   return ok
-end
-
--- pane の並び(rects = { { id, left, top, width, height }, ... }。領域 (x, y, w, h) の中の位置)から分割の木を作る。
--- WezTerm の並びは、縦か横の 1 本の線で必ず 2 つに分けられる。節 = { dir = "h" | "v", w, h, first, second }、葉 = { id, w, h }
-local function layout_tree(rects, x, y, w, h)
-  if #rects == 1 then return { id = rects[1].id, w = w, h = h } end
-  for _, axis in ipairs({ { "left", "width", "h" }, { "top", "height", "v" } }) do
-    local pos, len, dir = axis[1], axis[2], axis[3]
-    for _, r in ipairs(rects) do
-      local c = r[pos] -- この pane の手前(c - 1)の 1 本が、全部の pane を 2 つに分けるか
-      if c > (dir == "h" and x or y) then
-        local a, b, ok = {}, {}, true
-        for _, q in ipairs(rects) do
-          if q[pos] + q[len] < c then table.insert(a, q)
-          elseif q[pos] >= c then table.insert(b, q)
-          else ok = false break end
-        end
-        if ok and #a > 0 and #b > 0 then
-          local first, second
-          if dir == "h" then
-            first, second = layout_tree(a, x, y, c - 1 - x, h), layout_tree(b, c, y, x + w - c, h)
-          else
-            first, second = layout_tree(a, x, y, w, c - 1 - y), layout_tree(b, x, c, w, y + h - c)
-          end
-          if first and second then return { dir = dir, w = w, h = h, first = first, second = second } end
-        end
-      end
-    end
-  end
-  return nil -- 分けられない(想定外の並び)
-end
-
--- 木の各節に、戻す先の大きさ(tw, th)を割り付ける。元(w, h)と違う大きさなら元の比で配る
-local function fit_layout(node, tw, th)
-  node.tw, node.th = tw, th
-  if node.id then return end
-  if node.dir == "h" then
-    local fw = node.first.w
-    if tw ~= node.w then fw = math.max(1, math.min(tw - 2, math.floor(fw * tw / node.w + 0.5))) end
-    fit_layout(node.first, fw, th)
-    fit_layout(node.second, tw - fw - 1, th)
-  else
-    local fh = node.first.h
-    if th ~= node.h then fh = math.max(1, math.min(th - 2, math.floor(fh * th / node.h + 0.5))) end
-    fit_layout(node.first, tw, fh)
-    fit_layout(node.second, tw, th - fh - 1)
-  end
 end
 
 local function layout_has(node, id)
