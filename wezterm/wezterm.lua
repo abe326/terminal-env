@@ -1322,7 +1322,120 @@ local function dual(seq, local_action)
 end
 
 -- ツリー(nvim + neo-tree)を左端に出す / 出ていればそこへ移る / ツリーにいれば閉じる
+--   右側(ツリーの右)に pane が 2 つ以上あるときは top_level の分割を使わない。WezTerm 20240203 では、既存の pane が
+--   2 つ以上あるときの top_level の分割が、新しい pane を「残りの側」の大きさ(右側の幅)で起こしたまま直さず
+--   (ツリーが右側の幅のまま左端に置かれ、ほかの pane の後ろに透ける)、タブが覚えている大きさも縮んだまま戻さない
+--   (mux/src/tab.rs の split_and_insert・mux/src/domain.rs の split_pane)。代わりに、
+--   1. 右側の pane の並び(位置と大きさ)を控え、main(下記)だけ残して他を同じ窓の新しいタブへ出す(タブは切り替わらない)
+--   2. main を普通に左右へ割ってツリーを作る(pane が 1 つなら普通の分割で、両方とも正しい大きさになる)
+--   3. 出した pane を、控えた並び・大きさで main の側に 1 つずつ戻す(wezterm cli split-pane --move-pane-id。空のタブは消える)
+--   ツリーを閉じるときに右側の並びを覚えておき、同じ pane の組のまま開き直すときは、閉じる前の幅に戻す。
+--   main(TENV_MAIN_PANE。ツリーから開いたファイルのエディタは、この pane の上に作る)は、タブで最初にツリーを出した
+--   pane のまま。閉じたあとにどの pane が選ばれるかは決まらないので、開き直しで変えない(その pane が無ければ今の pane)
 wezterm.GLOBAL.tree_panes = wezterm.GLOBAL.tree_panes or {}
+wezterm.GLOBAL.tree_layout = wezterm.GLOBAL.tree_layout or {} -- タブ → ツリーを閉じたときの右側の並び(JSON)
+wezterm.GLOBAL.tree_main = wezterm.GLOBAL.tree_main or {} -- タブ → main の pane
+
+local function wezterm_cli(args)
+  local argv = { wezterm.executable_dir .. "\\wezterm.exe", "cli" }
+  for _, a in ipairs(args) do table.insert(argv, a) end
+  local ok, _, err = wezterm.run_child_process(argv)
+  if not ok then wezterm.log_error("wezterm cli " .. table.concat(args, " ") .. ": " .. tostring(err)) end
+  return ok
+end
+
+-- pane の並び(rects = { { id, left, top, width, height }, ... }。領域 (x, y, w, h) の中の位置)から分割の木を作る。
+-- WezTerm の並びは、縦か横の 1 本の線で必ず 2 つに分けられる。節 = { dir = "h" | "v", w, h, first, second }、葉 = { id, w, h }
+local function layout_tree(rects, x, y, w, h)
+  if #rects == 1 then return { id = rects[1].id, w = w, h = h } end
+  for _, axis in ipairs({ { "left", "width", "h" }, { "top", "height", "v" } }) do
+    local pos, len, dir = axis[1], axis[2], axis[3]
+    for _, r in ipairs(rects) do
+      local c = r[pos] -- この pane の手前(c - 1)の 1 本が、全部の pane を 2 つに分けるか
+      if c > (dir == "h" and x or y) then
+        local a, b, ok = {}, {}, true
+        for _, q in ipairs(rects) do
+          if q[pos] + q[len] < c then table.insert(a, q)
+          elseif q[pos] >= c then table.insert(b, q)
+          else ok = false break end
+        end
+        if ok and #a > 0 and #b > 0 then
+          local first, second
+          if dir == "h" then
+            first, second = layout_tree(a, x, y, c - 1 - x, h), layout_tree(b, c, y, x + w - c, h)
+          else
+            first, second = layout_tree(a, x, y, w, c - 1 - y), layout_tree(b, x, c, w, y + h - c)
+          end
+          if first and second then return { dir = dir, w = w, h = h, first = first, second = second } end
+        end
+      end
+    end
+  end
+  return nil -- 分けられない(想定外の並び)
+end
+
+-- 木の各節に、戻す先の大きさ(tw, th)を割り付ける。元(w, h)と違う大きさなら元の比で配る
+local function fit_layout(node, tw, th)
+  node.tw, node.th = tw, th
+  if node.id then return end
+  if node.dir == "h" then
+    local fw = node.first.w
+    if tw ~= node.w then fw = math.max(1, math.min(tw - 2, math.floor(fw * tw / node.w + 0.5))) end
+    fit_layout(node.first, fw, th)
+    fit_layout(node.second, tw - fw - 1, th)
+  else
+    local fh = node.first.h
+    if th ~= node.h then fh = math.max(1, math.min(th - 2, math.floor(fh * th / node.h + 0.5))) end
+    fit_layout(node.first, tw, fh)
+    fit_layout(node.second, tw, th - fh - 1)
+  end
+end
+
+local function layout_has(node, id)
+  if node.id then return node.id == id end
+  return layout_has(node.first, id) or layout_has(node.second, id)
+end
+
+-- 節の領域を代表する pane: keep(動かさない pane)を含めばそれ、含まなければ先頭(左上)の pane
+local function layout_rep(node, keep)
+  if node.id then return node.id end
+  return layout_rep(layout_has(node.second, keep) and node.second or node.first, keep)
+end
+
+-- 節の領域を代表の pane 1 つが占めている状態から、節の並びに戻す(出してある pane を 1 つずつ入れる)
+local function layout_restore(node, keep)
+  if node.id then return end
+  local a, b = node.first, node.second
+  local at, moving, side, cells
+  if layout_has(b, keep) then -- 代表が second 側 → first の代表を左/上に入れる
+    at, moving = layout_rep(b, keep), layout_rep(a, keep)
+    side, cells = node.dir == "h" and "--left" or "--top", node.dir == "h" and a.tw or a.th
+  else
+    at, moving = layout_rep(a, keep), layout_rep(b, keep)
+    side, cells = node.dir == "h" and "--right" or "--bottom", node.dir == "h" and b.tw or b.th
+  end
+  if not wezterm_cli({ "split-pane", "--pane-id", tostring(at), side, "--cells", tostring(cells), "--move-pane-id", tostring(moving) }) then
+    wezterm_cli({ "split-pane", "--pane-id", tostring(at), side, "--move-pane-id", tostring(moving) }) -- 大きさが入らないときは半分で
+  end
+  layout_restore(a, keep)
+  layout_restore(b, keep)
+end
+
+-- ツリーを閉じる前に、右側の並びを覚える(開き直すときに同じ並び・同じ幅に戻す)。ツリーが左端の全高でないときは覚えない
+local function remember_layout(tab, key, tree_id)
+  local size = tab:get_size()
+  local tree, rects = nil, {}
+  for _, info in ipairs(tab:panes_with_info()) do
+    if info.pane:pane_id() == tree_id then tree = info
+    else table.insert(rects, { id = info.pane:pane_id(), left = info.left, top = info.top, width = info.width, height = info.height }) end
+  end
+  wezterm.GLOBAL.tree_layout[key] = nil
+  if not tree or tree.left ~= 0 or tree.height ~= size.rows or #rects == 0 then return end
+  local x0 = tree.width + 1
+  for _, r in ipairs(rects) do r.left = r.left - x0 end
+  wezterm.GLOBAL.tree_layout[key] = wezterm.json_encode({ w = size.cols - x0, h = size.rows, rects = rects })
+end
+
 local function toggle_tree_local(win, pane)
   local tab = pane:tab()
   local key = tostring(tab:tab_id())
@@ -1331,6 +1444,7 @@ local function toggle_tree_local(win, pane)
     for _, p in ipairs(tab:panes()) do
       if p:pane_id() == tree_id then
         if p:pane_id() == pane:pane_id() then
+          remember_layout(tab, key, tree_id)
           win:perform_action(act.CloseCurrentPane({ confirm = false }), p)
           wezterm.GLOBAL.tree_panes[key] = nil
         else
@@ -1340,18 +1454,49 @@ local function toggle_tree_local(win, pane)
       end
     end
   end
-  local cwd = pane:get_current_working_dir()
-  local new = pane:split({
+  tab:set_zoomed(false)
+  local size = tab:get_size()
+  local rects, main = {}, nil
+  for _, info in ipairs(tab:panes_with_info()) do
+    table.insert(rects, { id = info.pane:pane_id(), left = info.left, top = info.top, width = info.width, height = info.height })
+    if info.pane:pane_id() == wezterm.GLOBAL.tree_main[key] then main = info.pane end
+  end
+  main = main or pane
+  -- 戻す並び: 閉じたときに覚えた並びが同じ pane の組なら、それ(閉じる前の幅に戻る)。違えば今の並びを右側の幅に縮める
+  local layout
+  local ok, saved = pcall(wezterm.json_parse, wezterm.GLOBAL.tree_layout[key] or "")
+  if ok and type(saved) == "table" and type(saved.rects) == "table" and #saved.rects == #rects then
+    local ids, same = {}, true
+    for _, r in ipairs(saved.rects) do ids[r.id] = true end
+    for _, r in ipairs(rects) do if not ids[r.id] then same = false end end
+    if same then layout = layout_tree(saved.rects, 0, 0, saved.w, saved.h) end
+  end
+  layout = layout or layout_tree(rects, 0, 0, size.cols, size.rows)
+  wezterm.GLOBAL.tree_layout[key] = nil
+  local rebuild = layout ~= nil and #rects > 1
+  if rebuild then
+    fit_layout(layout, size.cols - S.tree_width - 1, size.rows)
+    for _, p in ipairs(tab:panes()) do
+      if p:pane_id() ~= main:pane_id() then
+        local moved, err = pcall(p.move_to_new_tab, p)
+        if not moved then wezterm.log_error("move_to_new_tab " .. p:pane_id() .. ": " .. tostring(err)) end
+      end
+    end
+  end
+  local cwd = main:get_current_working_dir()
+  local new = main:split({
     direction = "Left",
-    top_level = true,
     size = S.tree_width, -- 桁数
     cwd = cwd and cwd.file_path:gsub("^/(%a:)", "%1") or nil,
     args = { "nvim" },
     -- TENV_MAIN_PANE: ツリーから開いたファイルは、この pane の上にエディタを作って開く
-    set_environment_variables = { NVIM_TREE_ONLY = "1", TENV_MAIN_PANE = tostring(pane:pane_id()) },
+    set_environment_variables = { NVIM_TREE_ONLY = "1", TENV_MAIN_PANE = tostring(main:pane_id()) },
   })
+  if rebuild then layout_restore(layout, main:pane_id()) end
   wezterm.GLOBAL.tree_panes[key] = new:pane_id()
+  wezterm.GLOBAL.tree_main[key] = main:pane_id()
   wezterm.GLOBAL.tree_w[key] = S.tree_width -- 開くときはいつも既定の幅
+  new:activate() -- 戻した pane が選ばれた状態になるので、ツリーへ
 end
 
 local function sh_quote(s)
