@@ -1,0 +1,21 @@
+#!/usr/bin/env bash
+# tenv-browser <URL>          リンクを手元の PC で開く(環境変数 BROWSER に指定する。tmux/terminal-env.conf)
+# tenv-browser --pane <pane>  tmux でクリックされたリンクを開く(terminal-env.conf のマウスの設定から呼ばれる)
+#
+# BROWSER を 1 つのコマンドとして実行するプログラムがある(Claude Code など)ので、引数の要らない実行ファイルにしている。
+# クリックされたリンクはアプリの出力そのものなので、シェルのコマンド行に入れず、tmux が pane のオプション @tenv_link に置いたものを読む。
+set -eu
+
+if [ "${1:-}" = --pane ]; then
+  [ $# -eq 2 ] || exit 2
+  # wopen は TMUX_PANE の pane へ書く。run-shell には渡らないので、ここで指す
+  export TMUX_PANE="$2"
+  url=$(tmux show -pqv -t "$2" @tenv_link)
+  # tmux はリンクを覚えるとき、\ と、変数に見える $ の前に \\ を足す(?$filter=... のような URL が壊れないよう元に戻す)
+  url=${url//'\\$'/'$'}
+  url=${url//'\\'/'\'}
+else
+  [ $# -eq 1 ] || { sed -n '2,3p' "$0" | sed 's/^# //' >&2; exit 2; }
+  url="$1"
+fi
+exec "$HOME/.local/bin/wopen" --url "$url"

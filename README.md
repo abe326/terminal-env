@@ -144,7 +144,7 @@ git clone https://github.com/abe326/terminal-env.git ~/terminal-env
 [ -e ~/.config/nvim ] && [ ! -L ~/.config/nvim ] && mv ~/.config/nvim ~/.config/nvim.bk_$(date +%Y%m%d)
 mkdir -p ~/.config ~/.local/bin
 ln -sfn ~/terminal-env/nvim ~/.config/nvim
-ln -sf ~/terminal-env/bin/wopen ~/terminal-env/bin/tmux-tree ~/terminal-env/bin/tenv-open ~/terminal-env/bin/tenv-cc-state ~/.local/bin/
+ln -sf ~/terminal-env/bin/wopen ~/terminal-env/bin/tmux-tree ~/terminal-env/bin/tenv-open ~/terminal-env/bin/tenv-cc-state ~/terminal-env/bin/tenv-browser ~/.local/bin/
 chmod +x ~/terminal-env/bin/*
 echo 'source-file ~/terminal-env/tmux/terminal-env.conf' >> ~/.tmux.conf
 tmux source-file ~/.tmux.conf 2>/dev/null || true
@@ -176,7 +176,7 @@ Windows の `local.lua` の最後にある `remotes` の例を有効にして、
 
 ```bash
 readlink ~/.config/nvim                                   # ~/terminal-env/nvim
-ls -l ~/.local/bin/{wopen,tmux-tree,tenv-open,tenv-cc-state}
+ls -l ~/.local/bin/{wopen,tmux-tree,tenv-open,tenv-cc-state,tenv-browser}
 tmux -L tenv-check -f ~/.tmux.conf new-session -d && tmux -L tenv-check list-keys -T root M-E && tmux -L tenv-check kill-server
 nvim --headless +qa && echo ok
 ```
@@ -267,6 +267,8 @@ ssh でつないでいる pane では tmux に、ローカルの pane では Wez
 | Ctrl+C | 選択中ならコピー(エディタでも)、無ければ中断。ドラッグで選んだ範囲は、離したときにもコピーされる |
 | Ctrl+V | 貼り付け(どこでも。Claude Code への画像は Alt+V) |
 | 右クリック(リモートのシェル) | 範囲選択中ならコピー。tmux の英語メニューは出さない(Alt+右クリックで出せる) |
+| クリック(リモートの Claude Code のリンク) | PC で開く(http / https はブラウザ、ファイルは Windows のアプリ)。普通の文字の URL(コマンドの出力など)は Ctrl+クリック |
+| Shift+クリック(リモートの端末のリンク) | WezTerm がリンクを開く(tmux が使っているマウスを通らない) |
 | Shift+Enter / Alt+Enter | Claude Code の改行(Alt+Enter は WezTerm 標準の全画面切り替えの代わり) |
 
 ### ツリー
@@ -317,7 +319,7 @@ WezTerm はドラッグ中のマウスの位置をアプリに渡さない(ド�
 | 「プレビュー / 原文」/ Space v | Markdown の表示を切り替える(md は GitHub 風のプレビューで開く。編集を始めると原文になる) |
 | Ctrl+P / Ctrl+F | ファイル名で探す / 文字列で探す(ツリーで開いているフォルダの中) |
 
-リモートのシェルからも `wopen <ファイル>`(Windows アプリで開く)、`wopen -r <ファイル>`(エクスプローラーで表示)が使えます。
+リモートのシェルからも `wopen <ファイル>`(Windows アプリで開く)、`wopen -r <ファイル>`(エクスプローラーで表示)、`wopen --url <URL>`(PC のブラウザで開く)が使えます。
 
 ### リモートから、この PC の Claude Code に頼む(使う場合だけ)
 
@@ -415,7 +417,8 @@ remotes = {
 | `tmux/terminal-env.conf` | tmux の設定(`source-file` で読み込む) |
 | `bin/tenv-open` | Shift+Alt+O の本体(リモートでセッションを用意して attach)。`-r <会話>` で、その中で Claude Code の会話を再開する |
 | `bin/tmux-tree` | tmux の Shift+Alt+E の本体。ツリーの幅を保つ。WezTerm からつないだとき、設定が変わる前に起動したツリーを作り直す(tmux のセッションは残るため) |
-| `bin/wopen` | リモート → WezTerm へ合図を送る(開く・表示・編集・Git・設定・操作一覧・ファイルの配置・Claude Code に頼む) |
+| `bin/wopen` | リモート → WezTerm へ合図を送る(開く・表示・編集・Git・設定・操作一覧・ファイルの配置・Claude Code に頼む・リンクを開く) |
+| `bin/tenv-browser` | リンクを PC で開く。環境変数 `BROWSER` の中身で、tmux のクリックからも呼ばれる |
 | `scripts/install-windows.ps1` | Windows の導入(管理者権限なし。`-Check` で確かめるだけ) |
 | `scripts/check_public.py` | 公開前の検査(秘密・個人の情報の形が無いか。CI でも動く) |
 | `bin/tenv-cc-state` | Claude Code の hook から状態を WezTerm のタブへ伝える。指示を出した日時も残す |
@@ -425,6 +428,8 @@ remotes = {
 - リモートの `wopen` が端末へ `OSC 1337 SetUserVar=wez_open` を送り(tmux は passthrough で通す)、WezTerm がそれを受けて
   `path_map` で Windows のパスに直し、Windows の既定のアプリで開きます。新しいポートや Windows 側の SSH サーバーは要りません。
   合図には合言葉が付き、WezTerm は合わないものを捨てます(下の「安全のために」)
+- リモートの Claude Code のリンクは、tmux がクリックされた位置のリンクを読んで `bin/tenv-browser` → `wopen --url` で PC へ渡します(Claude Code に任せると、Ctrl / Alt なしでは開かず、開くときもリモートの上で開こうとするため)。
+  文字の URL は tmux にはリンクとして見えないので、Claude Code が `BROWSER`(同じ `tenv-browser`)を呼ぶ経路で開きます。`BROWSER` は tmux の設定が新しい pane に渡します
 - Claude Code の状態は、リモートでは tmux の pane に残し、セッション全体で一番目立つ状態を `SetUserVar=tenv_cc` で WezTerm に送ります。
   ローカルでは `%LOCALAPPDATA%\tenv\cc\` のファイルを WezTerm が 1 秒ごとに読みます
 - 指示を出した日時は、リモートは `~/.local/state/tenv/last-prompt/`、ローカルは `%LOCALAPPDATA%\tenv\last-prompt\` に残ります(hook を入れた後の分から)
@@ -455,6 +460,8 @@ remotes = {
 - リモートの合図・端末のリンク(`file:`)から開くとき: 実行形式(exe・bat・ps1・lnk など、Windows で開く = 実行になる種類)は開きません。スクリプト(py・sh など)・マクロを含みうる Office(xlsm・doc など)は、開く前に確認を出します(最初に選ばれているのは「やめる」)。それ以外(文書・画像・データ・ソースコードなど)はそのまま開きます
 - 拡張子の無い名前・`%` を含む名前・Windows で別の意味になる文字(`: " < > | ? * \`・制御文字・名前の末尾の `.` と空白)を含む名前は開きません。Windows が種類を補ったり環境変数を展開したりして、名前と違うファイルを実行するのを防ぐためです。中を見るならツリーのダブルクリック(エディタ)
 - 端末の中のリンクは、http / https / mailto と、この PC のファイル(`file:`。上と同じ扱い)を開きます。それ以外の種類(Windows でプログラムを動かせるもの)は開きません
+- リモートから渡されたリンク(`wopen --url`・Claude Code のリンクのクリック)は、http / https と、リモートのファイル(`file:`。`wopen <ファイル>` と同じ扱い)だけを開きます。`vscode:`・`ms-msdt:` などは開きません。`"` と空白を含む URL は断ります。リンクの文字列はアプリの出力そのものなので、シェルのコマンド行には入れません
+- 合言葉はリモートのファイルにあるので、リモートのプログラムは確認なしに PC のブラウザで http / https のページを開けます
 - **ツリーの「アプリで開く」(右クリック・`O`)は、手元のファイルを Windows の既定のアプリで開きます。これは実行形式(exe・bat など)も開ける = 実行するので、中身の分からないフォルダのファイルは、中を見るならダブルクリック(エディタ)、場所を見るなら「エクスプローラー」を使ってください**(名前を補って別のファイルを実行することはありません。名前どおりのものが無ければ開きません)
 
 **送る(ドラッグ&ドロップ)**
@@ -479,7 +486,7 @@ remotes = {
 ## 外す
 
 - Windows: 環境変数 `WEZTERM_CONFIG_FILE` を消し、`%LOCALAPPDATA%\nvim` のジャンクションを消す(`cmd /c rmdir "%LOCALAPPDATA%\nvim"`。`Remove-Item -Recurse` はリンク先の中身まで消すことがあるので使わない)。`settings.json` の `tenv-cc-state` の hook を消す。導入スクリプトで入れたものは、`%LOCALAPPDATA%\Programs\WezTerm`・`Neovim` のフォルダ、スタートメニューの `WezTerm`、ユーザーの PATH の 2 行、フォント(設定 →「フォント」)
-- Linux: `~/.tmux.conf` の `source-file` の行を消し、`~/.config/nvim` と `~/.local/bin/{wopen,tmux-tree,tenv-open,tenv-cc-state}` のリンクを消す。`settings.json` の hook を消す
+- Linux: `~/.tmux.conf` の `source-file` の行を消し、`~/.config/nvim` と `~/.local/bin/{wopen,tmux-tree,tenv-open,tenv-cc-state,tenv-browser}` のリンクを消す。`settings.json` の hook を消す
 
 ## ライセンス
 

@@ -9,6 +9,7 @@
 #   wopen --upload <dir> <Windows のパス>...   Windows のファイルを <dir> に配置する(WezTerm 側で確認が出る)
 #   wopen --claude <file>         Windows の新しいタブで Claude Code を起動し、<file> を読ませる(WezTerm の ask_claude)
 #   wopen --close <file>          --claude <file> で開いたタブを閉じる
+#   wopen --url <URL>             http / https は既定のブラウザ、file: はこの機械のパスとして <path> と同じ扱いで開く
 #
 # 端末(手元の WezTerm)へ OSC 1337 SetUserVar=wez_open を送り、WezTerm の設定(wezterm.lua の user-var-changed)が受ける。
 # 新しいポートや Windows 側の sshd は要らない。
@@ -37,7 +38,7 @@ token() {
 
 send() { emit "$1|$2|$(date +%s%N)|$(token)"; }
 
-usage() { sed -n '2,11p' "$0" | sed 's/^# //' >&2; exit 2; }
+usage() { sed -n '2,12p' "$0" | sed 's/^# //' >&2; exit 2; }
 
 case "${1:-}" in
   ""|-h|--help) usage ;;
@@ -47,6 +48,14 @@ case "${1:-}" in
   --git) [ $# -eq 2 ] || usage; send git "$(realpath -- "$2")" ;;
   --claude) [ $# -eq 2 ] && [ -f "$2" ] || usage; send claude "$(realpath -- "$2")" ;;
   --close) [ $# -eq 2 ] && [ -f "$2" ] || usage; send close "$(realpath -- "$2")" ;;
+  --url)
+    [ $# -eq 2 ] || usage
+    # 開けない種類は、ここで失敗を返す(呼んだ側が失敗として扱えるように)。WezTerm 側でも確かめる
+    case "${2,,}" in
+      http://*|https://*|file://*) send url "$2" ;;
+      *) echo "wopen: 開けるのは http / https / file のリンクだけです: $2" >&2; exit 1 ;;
+    esac
+    ;;
   --upload)
     [ $# -ge 3 ] || usage
     dest=$(realpath -- "$2"); shift 2

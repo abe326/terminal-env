@@ -95,6 +95,14 @@
 | `Alt+V` | Claude Code に画像を貼る |
 | `Shift+Enter` / `Alt+Enter` | Claude Code の改行 |
 
+## リンク(リモートの Claude Code)
+
+| 操作 | 動作 |
+|---|---|
+| クリック | PC で開く(http / https はブラウザ、ファイルは Windows のアプリ) |
+| `Ctrl+クリック` | 上と同じ。普通の文字の URL(コマンドの出力など)も開く |
+| `Shift+クリック` | WezTerm がリンクを開く |
+
 ## Lazygit(よく使うもの)
 
 | キー | 動作 |

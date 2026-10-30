@@ -1255,15 +1255,62 @@ local function open_checked(window, pane, path, do_open)
   do_open()
 end
 
--- 端末の中のリンク(OSC 8 / URL)を Ctrl+クリックで開くとき
+local function open_allowed(rem, p)
+  local list = rem.open_allowed
+  if not list then
+    list = {}
+    for _, m in ipairs(rem.path_map) do table.insert(list, (m[1]:gsub("/$", "")) .. "/") end
+  end
+  for _, pre in ipairs(list) do
+    if starts_with(p, pre) then return true end
+  end
+  return false
+end
+
+local function warn_unsafe_name(window)
+  window:toast_notification("WezTerm", "Windows では扱えない文字を含む名前です(: \" < > | ? * \\ や、末尾の . と空白)。"
+    .. "ツリーのダブルクリック(エディタ)なら開けます", nil, 6000)
+end
+
+-- リモートのファイルを Windows のアプリで開く(wopen <パス>・リモートの pane の file: リンク)
+local function open_remote(window, pane, rem, path)
+  if path:find("%.%.") then return end
+  if not safe_remote_path(path) then return warn_unsafe_name(window) end
+  if not open_allowed(rem, path) then
+    window:toast_notification("WezTerm", "開けない場所です: " .. path, nil, 4000)
+    return
+  end
+  local win_path = remote_to_windows(rem, path)
+  open_checked(window, pane, path, function()
+    if rem.open_command then
+      wezterm.background_child_process(rem.open_command(path, win_path))
+    elseif win_path then
+      -- Windows の「開く」(既定のアプリ)。explorer.exe の引数の読み方(, で区切るなど)を通さない
+      wezterm.open_with(win_path)
+    end
+  end)
+end
+
+-- file: のリンクからパスを取り出す(%xx を戻す。? と # から後はパスではない)
+local function file_uri_path(uri)
+  local p = uri:match("^[Ff][Ii][Ll][Ee]://[^/]*(/[^?#]*)")
+  return p and (p:gsub("%%(%x%x)", function(h) return string.char(tonumber(h, 16)) end))
+end
+
+-- 端末の中のリンク(OSC 8 / URL)を WezTerm で開くとき(ローカルの pane の Ctrl+クリック。tmux の中は Shift+クリック)
 --   ・http / https / mailto: 既定のブラウザ・メール(標準の動き)
---   ・file:(Claude Code などが出すファイルのリンク): 上と同じ拡張子の扱いで、Windows のアプリで開く
+--   ・file:(Claude Code などが出すファイルのリンク): 上と同じ拡張子の扱いで、Windows のアプリで開く。
+--     リモートの pane のリンクは、リモートのパスとして path_map で直す
 --   ・それ以外(ms-msdt: など、Windows でプログラムを動かせる種類): 開かない
 wezterm.on("open-uri", function(window, pane, uri)
   if uri:match("^https?://") or uri:match("^mailto:") then return end
-  local file = uri:match("^file://[^/]*(/.*)$")
+  local file = file_uri_path(uri)
   if file then
-    file = file:gsub("%%(%x%x)", function(h) return string.char(tonumber(h, 16)) end)
+    local rem = remote_of(pane)
+    if rem and not file:match("^/%a:") then
+      open_remote(window, pane, rem, file)
+      return false
+    end
     file = file:gsub("^/(%a:)", "%1"):gsub("/", "\\")
     if file:match("^%a:\\") and not file:find('[%c"<>|%?%*%%]') and not file:sub(3):find(":", 1, true)
       and not file:match("[%. ]$") then
@@ -1275,16 +1322,32 @@ wezterm.on("open-uri", function(window, pane, uri)
   return false
 end)
 
-local function open_allowed(rem, p)
-  local list = rem.open_allowed
-  if not list then
-    list = {}
-    for _, m in ipairs(rem.path_map) do table.insert(list, (m[1]:gsub("/$", "")) .. "/") end
+-- リモートから頼まれたリンクを開く(wopen --url)。リモートの言うことを信じず、開く種類はここで決める
+--   ・http / https: 既定のブラウザ(ShellExecute に渡すので、シェルは通らない。ブラウザの引数に混ざる " と空白は断る)
+--   ・file: リモートのファイルとして wopen <パス> と同じ扱い
+--   ・それ以外(vscode:・ms-msdt: など): 開かない
+local function open_url(window, pane, url)
+  local file = file_uri_path(url)
+  local rem = file and remote_of(pane)
+  if url:match("^[Hh][Tt][Tt][Pp][Ss]?://[^%s/]") and not url:find('[%c%s"]') then
+    wezterm.open_with(url)
+  elseif rem then
+    open_remote(window, pane, rem, file)
+  else
+    window:toast_notification("WezTerm", "このリンクは開きません: " .. url:sub(1, 80), nil, 4000)
   end
-  for _, pre in ipairs(list) do
-    if starts_with(p, pre) then return true end
+end
+
+-- 少し前(2 秒以内)に同じものが来たか
+local SEEN = {}
+local function seen_recently(key)
+  local now = os.time()
+  for k, t in pairs(SEEN) do
+    if now - t > 2 then SEEN[k] = nil end
   end
-  return false
+  local seen = SEEN[key] ~= nil
+  SEEN[key] = now
+  return seen
 end
 
 ----------------------------------------------------------------
@@ -1400,7 +1463,7 @@ end
 wezterm.on("user-var-changed", function(window, pane, name, value)
   if name ~= "wez_open" then return end
   -- 合言葉が合わない合図は捨てる(端末に流れただけの文字列からは来ない)。知らせるのは 1 分に 1 回まで
-  local kind, path, tok = value:match("^(%a+)|(/.-)|%d+|([%x,]+)$")
+  local kind, path, stamp, tok = value:match("^(%a+)|(.-)|(%d+)|([%x,]+)$")
   if not kind or not token_ok(tok) then
     if os.time() - (wezterm.GLOBAL.tenv_bad_token_at or 0) > 60 then
       wezterm.GLOBAL.tenv_bad_token_at = os.time()
@@ -1408,15 +1471,18 @@ wezterm.on("user-var-changed", function(window, pane, name, value)
     end
     return
   end
-  if path:find("%.%.") then return end
+  -- 同じ pane を複数のタブ(tmux のクライアント)で見ていると、合図はその数だけ届く。wopen の時刻が同じなら同じ合図
+  if seen_recently(stamp) then return end
+  if kind == "url" then
+    -- Ctrl / Alt 付きのクリックは、tmux と Claude Code の両方から来る(tmux/terminal-env.conf)。ダブルクリックも 1 回にする
+    if not seen_recently(path) then open_url(window, pane, path) end
+    return
+  end
+  if path:sub(1, 1) ~= "/" or path:find("%.%.") then return end
   -- Windows で開く・表示するときだけ、Windows で別の意味になる文字を確かめる。
   -- 編集・Git はリモートの中だけで動くので、制御文字だけを確かめる(配置は「配置先 改行 Windows のパス...」の形)
   if kind == "open" or kind == "reveal" or kind == "claude" or kind == "close" then
-    if not safe_remote_path(path) then
-      window:toast_notification("WezTerm", "Windows では扱えない文字を含む名前です(: \" < > | ? * \\ や、末尾の . と空白)。"
-        .. "ツリーのダブルクリック(エディタ)なら開けます", nil, 6000)
-      return
-    end
+    if not safe_remote_path(path) then return warn_unsafe_name(window) end
   elseif (kind == "upload" and (path:match("^[^\n]*") or "") or path):find("%c") then
     return
   end
@@ -1498,23 +1564,17 @@ wezterm.on("user-var-changed", function(window, pane, name, value)
     return
   end
 
+  if kind == "open" then
+    open_remote(window, pane, rem, path)
+    return
+  end
   if not open_allowed(rem, path) then
     window:toast_notification("WezTerm", "開けない場所です: " .. path, nil, 4000)
     return
   end
   local win_path = remote_to_windows(rem, path)
 
-  if kind == "open" then
-    local function do_open()
-      if rem.open_command then
-        wezterm.background_child_process(rem.open_command(path, win_path))
-      elseif win_path then
-        -- Windows の「開く」(既定のアプリ)。explorer.exe の引数の読み方(, で区切るなど)を通さない
-        wezterm.open_with(win_path)
-      end
-    end
-    open_checked(window, pane, path, do_open)
-  elseif kind == "claude" then
+  if kind == "claude" then
     ask_claude(window, win_path)
   elseif kind == "close" then
     ask_close(window, win_path)
